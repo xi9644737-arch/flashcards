@@ -17,6 +17,8 @@ struct QuizView: View {
     @State private var judging = false
     @State private var errorText: String?
     @State private var showHint = false
+    @State private var planLabel: String?
+    @State private var servedQuizID: UUID?
     @FocusState private var focused: Bool
 
     private var deckIndex: Int? { store.index(of: deckID) }
@@ -115,8 +117,11 @@ struct QuizView: View {
                     }
 
                     if let quiz {
-                        HStack {
+                        HStack(spacing: 6) {
                             Tag(text: quiz.kind.label, color: T.accent, bg: T.accentBg)
+                            if let planLabel {
+                                Tag(text: planLabel)
+                            }
                             Spacer()
                             if !quiz.hint.isEmpty && judgement == nil {
                                 Button(showHint ? "收起提示" : "看提示") { showHint.toggle() }
@@ -342,22 +347,66 @@ struct QuizView: View {
         loadQuiz()
     }
 
-    private func loadQuiz() {
+    private func loadQuiz(forceFresh: Bool = false) {
         guard let card else { return }
         quiz = nil; judgement = nil; answer = ""
-        showHint = false; errorText = nil; loading = true
+        showHint = false; errorText = nil; planLabel = nil
+        servedQuizID = nil; loading = true
 
         let client = AIClient(settings: ai.settings)
         let weak = ai.weakest(ai.settings.weakHintCount)
+        let plan: QuizPlan = forceFresh ? .fresh : QuizPlanner.plan(for: card)
+        let cid = card.id
 
         Task {
             do {
-                let q = try await client.makeQuiz(card: card, weak: weak)
-                await MainActor.run { quiz = q; loading = false }
+                switch plan {
+                case .reuse(let stored):
+                    // 零调用
+                    await MainActor.run {
+                        quiz = stored.asQuiz
+                        servedQuizID = stored.id
+                        planLabel = plan.label
+                        loading = false
+                        store.markQuizUsed(stored.id, cardID: cid, in: deckID)
+                    }
+
+                case .variant(let stored):
+                    let q = try await client.makeVariant(of: stored, card: card)
+                    await MainActor.run {
+                        quiz = q
+                        servedQuizID = stored.id
+                        planLabel = plan.label
+                        loading = false
+                        store.markQuizUsed(stored.id, cardID: cid, in: deckID)
+                    }
+
+                case .fresh:
+                    let q = try await client.makeQuiz(card: card, weak: weak)
+                    await MainActor.run {
+                        quiz = q
+                        servedQuizID = nil
+                        planLabel = plan.label
+                        loading = false
+                        store.addQuiz(q, cardID: cid, in: deckID)
+                    }
+                }
             } catch {
-                await MainActor.run {
-                    errorText = (error as? AIError)?.errorDescription ?? error.localizedDescription
-                    loading = false
+                // 接口挂了或者没网：库里有存货就照常练，只是批改要等联网
+                if let fallback = QuizPlanner.fallback(for: card) {
+                    await MainActor.run {
+                        quiz = fallback.asQuiz
+                        servedQuizID = fallback.id
+                        planLabel = "离线复用"
+                        errorText = "连不上接口，先用存着的旧题。答完要联网才能批改。"
+                        loading = false
+                        store.markQuizUsed(fallback.id, cardID: cid, in: deckID)
+                    }
+                } else {
+                    await MainActor.run {
+                        errorText = (error as? AIError)?.errorDescription ?? error.localizedDescription
+                        loading = false
+                    }
                 }
             }
         }
@@ -375,6 +424,8 @@ struct QuizView: View {
                     judgement = j
                     ai.record(j)
                     judging = false
+                    // 错了下次就出全新的，不拿旧题糊弄
+                    store.setLastQuizWrong(!j.correct, cardID: card.id, in: deckID)
                 }
             } catch {
                 await MainActor.run {
@@ -402,10 +453,44 @@ struct AISettingsView: View {
     @State private var testing = false
     @State private var testResult: String?
     @State private var ok = false
+    @State private var listing = false
+    @State private var models: [String] = []
+    @State private var modelError: String?
 
     var body: some View {
         NavigationStack {
             Screen(title: "AI 设置", subtitle: "填一个 OpenAI 兼容的接口") {
+
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionLabel(text: "快速填入")
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 7) {
+                            ForEach(Preset.all) { p in
+                                Button {
+                                    ai.settings.baseURL = p.url
+                                    if !p.model.isEmpty { ai.settings.model = p.model }
+                                    testResult = nil
+                                    models = []
+                                } label: {
+                                    Text(p.name)
+                                        .font(T.sans(13, .medium))
+                                        .foregroundColor(ai.settings.baseURL == p.url ? .white : T.text)
+                                        .padding(.horizontal, 12).padding(.vertical, 7)
+                                        .background(ai.settings.baseURL == p.url ? T.accent : T.surface)
+                                        .clipShape(Capsule())
+                                        .overlay(Capsule().stroke(
+                                            ai.settings.baseURL == p.url ? Color.clear : T.line, lineWidth: 1))
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 2).padding(.vertical, 2)
+                    }
+                    if let p = Preset.all.first(where: { $0.url == ai.settings.baseURL }) {
+                        Text(p.note)
+                            .font(T.sans(12)).foregroundColor(T.faint)
+                            .padding(.leading, 4)
+                    }
+                }
 
                 VStack(alignment: .leading, spacing: 8) {
                     SectionLabel(text: "接口地址")
@@ -416,7 +501,7 @@ struct AISettingsView: View {
                             .autocorrectionDisabled()
                             .keyboardType(.URL)
                     }
-                    Text("填到域名就够，/v1/chat/completions 会自动补。DeepSeek、硅基流动、Moonshot、OpenRouter、自己搭的都行。")
+                    Text("填到 /v1 或者只填到域名都行，/chat/completions 会自动补。")
                         .font(T.sans(12)).foregroundColor(T.faint)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.leading, 4)
@@ -435,10 +520,61 @@ struct AISettingsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     SectionLabel(text: "模型")
                     Panel {
-                        TextField("deepseek-chat", text: $ai.settings.model)
+                        TextField("deepseek-v4-flash", text: $ai.settings.model)
                             .font(T.sans(15))
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                    }
+
+                    Button {
+                        fetchModels()
+                    } label: {
+                        HStack(spacing: 6) {
+                            if listing { ProgressView().scaleEffect(0.8) }
+                            Image(systemName: "arrow.down.circle")
+                            Text(listing ? "拉取中......" : "拉取可用模型")
+                        }
+                        .font(T.sans(13.5))
+                        .foregroundColor(T.accent)
+                    }
+                    .disabled(listing || ai.settings.apiKey.isEmpty)
+                    .padding(.leading, 4)
+
+                    if let modelError {
+                        Text(modelError)
+                            .font(T.sans(12)).foregroundColor(T.amber)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 4)
+                    }
+
+                    if !models.isEmpty {
+                        Panel(padding: 0) {
+                            VStack(spacing: 0) {
+                                ForEach(Array(models.enumerated()), id: \.element) { idx, m in
+                                    Button {
+                                        ai.settings.model = m
+                                    } label: {
+                                        HStack {
+                                            Text(m)
+                                                .font(T.sans(14))
+                                                .foregroundColor(T.text)
+                                                .lineLimit(1)
+                                            Spacer()
+                                            if ai.settings.model == m {
+                                                Image(systemName: "checkmark")
+                                                    .font(.system(size: 12, weight: .bold))
+                                                    .foregroundColor(T.accent)
+                                            }
+                                        }
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(.horizontal, T.pad).padding(.vertical, 11)
+
+                                    if idx < models.count - 1 { Hair().padding(.leading, T.pad) }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -492,6 +628,23 @@ struct AISettingsView: View {
             }
         }
         .tint(T.accent)
+    }
+
+    private func fetchModels() {
+        listing = true; modelError = nil
+        let client = AIClient(settings: ai.settings)
+        Task {
+            do {
+                let list = try await client.listModels()
+                await MainActor.run { models = list; listing = false }
+            } catch {
+                await MainActor.run {
+                    models = []
+                    modelError = (error as? AIError)?.errorDescription ?? error.localizedDescription
+                    listing = false
+                }
+            }
+        }
     }
 
     private func runTest() {

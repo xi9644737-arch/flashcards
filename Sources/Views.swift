@@ -705,67 +705,192 @@ struct ImportView: View {
     let deckID: UUID
     @State private var text = ""
     @State private var mode: ImportMode = .oneLine
-    @State private var message: String?
+    @State private var strategy: ImportStrategy = .merge
+    @State private var result: ImportResult?
+    @State private var showFilePicker = false
+    @State private var loadedName: String?
+    @State private var fileError: String?
 
     private var preview: [Card] { CardParser.parse(text, mode: mode) }
+
+    /// 拿现有卡库比一下，导之前就知道会新增几张、改几张
+    private var forecast: ImportResult? {
+        guard !preview.isEmpty, strategy == .merge,
+              let deck = store.decks.first(where: { $0.id == deckID }) else { return nil }
+        var existing: [String: String] = [:]
+        for c in deck.cards {
+            let k = Store.key(c.front)
+            if !k.isEmpty && existing[k] == nil { existing[k] = c.back }
+        }
+        var r = ImportResult()
+        for c in preview {
+            let k = Store.key(c.front)
+            if k.isEmpty { continue }
+            if let old = existing[k] {
+                if old == c.back { r.unchanged += 1 } else { r.updated += 1 }
+            } else {
+                r.added += 1
+            }
+        }
+        return r
+    }
 
     var body: some View {
         NavigationStack {
             Screen(title: "批量导入", subtitle: "从别处复制，粘贴进来") {
-                Picker("模式", selection: $mode) {
-                    ForEach(ImportMode.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
+                VStack(spacing: 10) {
+                    Button {
+                        showFilePicker = true
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: "folder")
+                            Text("从文件选")
+                        }
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
 
-                Text(mode.hint)
-                    .font(T.sans(12.5)).foregroundColor(T.faint)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 4)
+                    if let loadedName {
+                        Text("已读入：\(loadedName)")
+                            .font(T.sans(12.5)).foregroundColor(T.green)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.leading, 4)
+                    } else {
+                        Text("txt 或 csv 都行。放进「文件」App、iCloud 云盘、或者用数据线拷到手机上都能选到。也可以直接往下面的框里粘。")
+                            .font(T.sans(12)).foregroundColor(T.faint)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 4)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionLabel(text: "文本格式")
+                    Picker("模式", selection: $mode) {
+                        ForEach(ImportMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text(mode.hint)
+                        .font(T.sans(12.5)).foregroundColor(T.faint)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 4)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionLabel(text: "碰到已有的卡怎么办")
+                    Picker("策略", selection: $strategy) {
+                        ForEach(ImportStrategy.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text(strategy.hint)
+                        .font(T.sans(12.5)).foregroundColor(T.faint)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 4)
+                }
 
                 Panel {
                     TextEditor(text: $text)
                         .font(.system(size: 14.5, design: .monospaced))
                         .scrollContentBackground(.hidden)
-                        .frame(minHeight: 220)
+                        .frame(minHeight: 200)
                 }
 
                 if !text.isEmpty {
-                    Text(preview.isEmpty
-                         ? "按这个模式一张也认不出来，换一个试试。"
-                         : "认出 \(preview.count) 张。第一张：\(preview[0].front) → \(preview[0].back)")
-                        .font(T.sans(12.5))
-                        .foregroundColor(preview.isEmpty ? T.amber : T.green)
+                    Panel {
+                        if preview.isEmpty {
+                            Text("按这个格式一张也认不出来，换一个试试。")
+                                .font(T.sans(13)).foregroundColor(T.amber)
+                        } else {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("认出 \(preview.count) 张")
+                                    .font(T.sans(14, .semibold)).foregroundColor(T.green)
+                                if let f = forecast {
+                                    Text("导进去会是：\(f.summary)")
+                                        .font(T.sans(13)).foregroundColor(T.dim)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                Text("第一张：\(preview[0].front) → \(preview[0].back)")
+                                    .font(T.sans(12.5)).foregroundColor(T.faint)
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
+                }
+
+                if let result {
+                    Panel {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("导完了").font(T.sans(14, .semibold)).foregroundColor(T.green)
+                            Text(result.summary)
+                                .font(T.sans(13)).foregroundColor(T.dim)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                if let fileError {
+                    Text(fileError).font(T.sans(13)).foregroundColor(T.amber)
                         .padding(.leading, 4)
                 }
 
-                if let message {
-                    Text(message).font(T.sans(13)).foregroundColor(T.amber)
-                }
-
-                Button("导入 \(preview.count) 张") { doImport() }
+                Button("导入") { doImport() }
                     .buttonStyle(PrimaryButtonStyle(enabled: !preview.isEmpty))
                     .disabled(preview.isEmpty)
+
+                if result != nil {
+                    Button("完成") { dismiss() }
+                        .buttonStyle(SecondaryButtonStyle())
+                }
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(T.bg, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("取消") { dismiss() }.tint(T.dim)
+                    Button(result == nil ? "取消" : "完成") { dismiss() }.tint(T.dim)
                 }
+            }
+            .fileImporter(isPresented: $showFilePicker,
+                          allowedContentTypes: [.plainText, .commaSeparatedText, .text],
+                          allowsMultipleSelection: false) { res in
+                handleFile(res)
             }
         }
         .tint(T.accent)
     }
 
-    private func doImport() {
-        let cards = preview
-        guard !cards.isEmpty, let i = store.index(of: deckID) else {
-            message = "一张也没认出来。"
-            return
+    private func handleFile(_ res: Result<[URL], Error>) {
+        fileError = nil
+        switch res {
+        case .failure(let e):
+            fileError = "打不开：\(e.localizedDescription)"
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let needsStop = url.startAccessingSecurityScopedResource()
+            defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url) else {
+                fileError = "读不出这个文件。"
+                return
+            }
+            // 大多是 UTF-8；再兜一层 GB18030，Windows 上导出的表格常见
+            let content = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: String.Encoding(
+                    rawValue: CFStringConvertEncodingToNSStringEncoding(
+                        CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue))))
+            guard let content, !content.isEmpty else {
+                fileError = "这个文件的编码认不出来，另存成 UTF-8 再试。"
+                return
+            }
+            text = content
+            loadedName = url.lastPathComponent
+            mode = ImportMode.guess(from: url.lastPathComponent)
+            result = nil
         }
-        store.decks[i].cards.append(contentsOf: cards)
-        store.save()
-        dismiss()
+    }
+
+    private func doImport() {
+        guard !preview.isEmpty else { return }
+        switch strategy {
+        case .merge:  result = store.merge(preview, into: deckID)
+        case .append: result = store.appendCards(preview, into: deckID)
+        }
     }
 }
 

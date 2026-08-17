@@ -28,6 +28,11 @@ struct Card: Codable, Identifiable, Equatable {
     /// 上一次复习时间，算 FSRS 的可提取性要用
     var lastReview: Date? = nil
 
+    /// 出过的题，只存原题。变体从原题现生成，不入库，免得越变越飘
+    var quizBank: [StoredQuiz] = []
+    /// 上一次 AI 出题答错没有。错了下次就出全新的，不复用
+    var lastQuizWrong: Bool = false
+
     init(front: String = "", back: String = "") {
         self.front = front
         self.back = back
@@ -50,6 +55,8 @@ struct Card: Codable, Identifiable, Equatable {
         stability  = (try? c.decode(Double.self, forKey: .stability))  ?? 0
         difficulty = (try? c.decode(Double.self, forKey: .difficulty)) ?? 0
         lastReview = try? c.decodeIfPresent(Date.self, forKey: .lastReview) ?? nil
+        quizBank   = (try? c.decode([StoredQuiz].self, forKey: .quizBank)) ?? []
+        lastQuizWrong = (try? c.decode(Bool.self, forKey: .lastQuizWrong)) ?? false
     }
 
     var stateName: String {
@@ -409,6 +416,106 @@ final class Store: ObservableObject {
 
     func index(of id: UUID) -> Int? { decks.firstIndex { $0.id == id } }
 
+    // MARK: 导入合并
+
+    /// 用正面当主键：去掉空格、统一大小写。同一张卡不管导几次都认得出来
+    static func key(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "　", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+            .lowercased()
+    }
+
+    /// 合并导入：正面相同的改答案、保留复习进度；没见过的才新增
+    @discardableResult
+    func merge(_ incoming: [Card], into deckID: UUID) -> ImportResult {
+        guard let di = index(of: deckID) else { return ImportResult() }
+        var result = ImportResult()
+
+        var map: [String: Int] = [:]
+        for (i, c) in decks[di].cards.enumerated() {
+            let k = Store.key(c.front)
+            if !k.isEmpty && map[k] == nil { map[k] = i }
+        }
+
+        for card in incoming {
+            let k = Store.key(card.front)
+            if k.isEmpty { continue }
+            if let i = map[k] {
+                if decks[di].cards[i].back == card.back {
+                    result.unchanged += 1
+                } else {
+                    // 只换答案，due / stability / difficulty / reps 全部留着
+                    decks[di].cards[i].back = card.back
+                    result.updated += 1
+                }
+            } else {
+                decks[di].cards.append(card)
+                map[k] = decks[di].cards.count - 1
+                result.added += 1
+            }
+        }
+
+        // 卡库里有、这次文件里没有的，报一下但不删
+        let incomingKeys = Set(incoming.map { Store.key($0.front) })
+        result.orphans = decks[di].cards.filter {
+            let k = Store.key($0.front)
+            return !k.isEmpty && !incomingKeys.contains(k)
+        }.count
+
+        save()
+        return result
+    }
+
+    // MARK: 题库
+
+    private func withCard(_ deckID: UUID, _ cardID: UUID, _ body: (inout Card) -> Void) {
+        guard let di = index(of: deckID),
+              let ci = decks[di].cards.firstIndex(where: { $0.id == cardID }) else { return }
+        body(&decks[di].cards[ci])
+        save()
+    }
+
+    /// 新题入库。超上限就淘汰用得最多、最久没用的那道
+    func addQuiz(_ quiz: Quiz, cardID: UUID, in deckID: UUID) {
+        withCard(deckID, cardID) { card in
+            var stored = StoredQuiz(quiz)
+            stored.uses = 1
+            stored.lastUsed = Date()
+            card.quizBank.append(stored)
+            if card.quizBank.count > QuizPlanner.cap {
+                card.quizBank.sort { a, b in
+                    if a.uses != b.uses { return a.uses > b.uses }
+                    return (a.lastUsed ?? .distantPast) < (b.lastUsed ?? .distantPast)
+                }
+                card.quizBank.removeFirst(card.quizBank.count - QuizPlanner.cap)
+            }
+        }
+    }
+
+    func markQuizUsed(_ quizID: UUID, cardID: UUID, in deckID: UUID) {
+        withCard(deckID, cardID) { card in
+            guard let i = card.quizBank.firstIndex(where: { $0.id == quizID }) else { return }
+            card.quizBank[i].uses += 1
+            card.quizBank[i].lastUsed = Date()
+        }
+    }
+
+    func setLastQuizWrong(_ wrong: Bool, cardID: UUID, in deckID: UUID) {
+        withCard(deckID, cardID) { $0.lastQuizWrong = wrong }
+    }
+
+    /// 纯追加，不查重
+    func appendCards(_ incoming: [Card], into deckID: UUID) -> ImportResult {
+        guard let di = index(of: deckID) else { return ImportResult() }
+        decks[di].cards.append(contentsOf: incoming)
+        save()
+        var r = ImportResult()
+        r.added = incoming.count
+        return r
+    }
+
     /// 统一的答题入口：改状态、写流水、存盘
     func answer(deckID: UUID, cardID: UUID, grade: Grade) {
         guard let di = index(of: deckID),
@@ -471,11 +578,48 @@ final class Store: ObservableObject {
     }
 }
 
+// MARK: - 导入
+
+struct ImportResult {
+    var added = 0
+    var updated = 0
+    var unchanged = 0
+    /// 卡库里有、但这次导入的文件里没有的
+    var orphans = 0
+
+    var summary: String {
+        var parts: [String] = []
+        if added > 0     { parts.append("新增 \(added)") }
+        if updated > 0   { parts.append("更新 \(updated)") }
+        if unchanged > 0 { parts.append("没变 \(unchanged)") }
+        if parts.isEmpty { return "什么也没导进去。" }
+        var s = parts.joined(separator: " · ")
+        if orphans > 0 { s += "\n另有 \(orphans) 张卡这份文件里没有，已保留。" }
+        return s
+    }
+}
+
+enum ImportStrategy: String, CaseIterable, Identifiable {
+    case merge  = "合并更新"
+    case append = "直接追加"
+    var id: String { rawValue }
+
+    var hint: String {
+        switch self {
+        case .merge:
+            return "用正面当主键。已有的卡只换答案，复习进度全部保留；没见过的才新增。资料改了重导一遍就行，不会变成两份。"
+        case .append:
+            return "不查重，全部当新卡加进去。只在确实要放一批全新内容时用。"
+        }
+    }
+}
+
 // MARK: - 批量导入的解析
 
 enum ImportMode: String, CaseIterable, Identifiable {
     case oneLine = "一行一张"
     case blank   = "空行分隔"
+    case csv     = "CSV"
     var id: String { rawValue }
 
     var hint: String {
@@ -484,13 +628,73 @@ enum ImportMode: String, CaseIterable, Identifiable {
             return "每行一张卡。正面和背面用 Tab、竖线、逗号或破折号隔开都行。\n例：顶点横坐标 | x = −b/(2a)"
         case .blank:
             return "第一行正面，后面几行是背面，卡与卡之间空一行。"
+        case .csv:
+            return "标准 CSV，前两列当正面和背面。带引号、字段里有逗号都能正确处理。表头会自动跳过。"
         }
+    }
+
+    /// 按文件名猜格式
+    static func guess(from filename: String) -> ImportMode {
+        filename.lowercased().hasSuffix(".csv") ? .csv : .oneLine
     }
 }
 
 enum CardParser {
     static func parse(_ raw: String, mode: ImportMode) -> [Card] {
-        mode == .oneLine ? parseOneLine(raw) : parseBlank(raw)
+        switch mode {
+        case .oneLine: return parseOneLine(raw)
+        case .blank:   return parseBlank(raw)
+        case .csv:     return parseCSV(raw)
+        }
+    }
+
+    /// RFC4180 那一套：双引号包裹，字段内的引号写成两个
+    private static func parseCSV(_ raw: String) -> [Card] {
+        var rows: [[String]] = []
+        var field = ""
+        var row: [String] = []
+        var inQuotes = false
+        var iterator = raw.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .makeIterator()
+        var pending: Character? = nil
+
+        while let ch = pending ?? iterator.next() {
+            pending = nil
+            if inQuotes {
+                if ch == "\"" {
+                    if let next = iterator.next() {
+                        if next == "\"" { field.append("\"") } else { inQuotes = false; pending = next }
+                    } else {
+                        inQuotes = false
+                    }
+                } else {
+                    field.append(ch)
+                }
+            } else {
+                switch ch {
+                case "\"": inQuotes = true
+                case ",":  row.append(field); field = ""
+                case "\n": row.append(field); field = ""; rows.append(row); row = []
+                default:   field.append(ch)
+                }
+            }
+        }
+        if !field.isEmpty || !row.isEmpty { row.append(field); rows.append(row) }
+
+        var out: [Card] = []
+        for (i, r) in rows.enumerated() {
+            guard r.count >= 2 else { continue }
+            var front = r[0].trimmingCharacters(in: .whitespaces)
+            let back = r[1].trimmingCharacters(in: .whitespaces)
+            // 去掉 BOM
+            if front.hasPrefix("\u{FEFF}") { front.removeFirst() }
+            if front.isEmpty && back.isEmpty { continue }
+            // 第一行看着像表头就跳过
+            if i == 0 && (front.contains("名称") || front.lowercased() == "front" || front == "正面") { continue }
+            out.append(Card(front: front, back: back))
+        }
+        return out
     }
 
     private static func parseOneLine(_ raw: String) -> [Card] {
