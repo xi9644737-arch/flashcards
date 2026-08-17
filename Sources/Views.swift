@@ -12,7 +12,6 @@ struct DeckListView: View {
     @State private var newName = ""
     @State private var showBackup = false
     @State private var showAISettings = false
-    @State private var showWeak = false
     @State private var showScheduler = false
 
     private var totalDue: Int { store.decks.reduce(0) { $0 + $1.dueTotal } }
@@ -44,22 +43,20 @@ struct DeckListView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     SectionLabel(text: "练习")
                     Panel(padding: 0) {
-                        VStack(spacing: 0) {
-                            RowButton(title: "AI 设置",
-                                      subtitle: ai.settings.configured ? "已接好 \(ai.settings.model)" : "还没填接口") {
-                                showAISettings = true
-                            }
-                            .padding(.horizontal, T.pad).padding(.vertical, 14)
-
-                            Hair().padding(.leading, T.pad)
-
-                            RowButton(title: "薄弱点",
-                                      subtitle: ai.tags.isEmpty ? "做几道题就有了" : "记录了 \(ai.tags.count) 个知识点") {
-                                showWeak = true
-                            }
-                            .padding(.horizontal, T.pad).padding(.vertical, 14)
+                        RowButton(title: "AI 设置",
+                                  subtitle: ai.settings.configured
+                                    ? "已接好 \(ai.settings.model)"
+                                    : "还没填接口") {
+                            showAISettings = true
                         }
+                        .padding(.horizontal, T.pad).padding(.vertical, 14)
                     }
+                    Text(ai.totalTagCount > 0
+                         ? "薄弱点按科分开记，一共 \(ai.totalTagCount) 个知识点。进牌组里看。"
+                         : "薄弱点和月考都在各自的牌组里，一科一套，互不干扰。")
+                        .font(T.sans(12)).foregroundColor(T.faint)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 4)
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -99,7 +96,6 @@ struct DeckListView: View {
             }
             .sheet(isPresented: $showBackup) { BackupView() }
             .sheet(isPresented: $showAISettings) { AISettingsView() }
-            .sheet(isPresented: $showWeak) { WeakPointsView() }
             .sheet(isPresented: $showScheduler) { SchedulerSettingsView() }
         }
         .tint(T.accent)
@@ -145,6 +141,9 @@ struct DeckView: View {
     let deckID: UUID
 
     @State private var showQuiz = false
+    @State private var showExam = false
+    @State private var showExamHistory = false
+    @State private var showWeak = false
     @State private var showStudy = false
     @State private var showImport = false
     @State private var showNewCard = false
@@ -206,6 +205,39 @@ struct DeckView: View {
                             .foregroundColor(T.faint)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.leading, 4)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        SectionLabel(text: "月考")
+                        Panel(padding: 0) {
+                            VStack(spacing: 0) {
+                                RowButton(title: deck.examDue ? "该月考了" : "月考",
+                                          subtitle: examSubtitle(deck),
+                                          trailing: {
+                                    if deck.examDue {
+                                        Circle().fill(T.accent).frame(width: 7, height: 7)
+                                    }
+                                }) { showExam = true }
+                                .padding(.horizontal, T.pad).padding(.vertical, 14)
+
+                                if !deck.exams.isEmpty {
+                                    Hair().padding(.leading, T.pad)
+                                    RowButton(title: "月考记录",
+                                              subtitle: "考过 \(deck.exams.count) 次，看进步曲线") {
+                                        showExamHistory = true
+                                    }
+                                    .padding(.horizontal, T.pad).padding(.vertical, 14)
+                                }
+
+                                Hair().padding(.leading, T.pad)
+                                RowButton(title: "薄弱点",
+                                          subtitle: {
+                                    let n = ai.tags(for: deckID).count
+                                    return n == 0 ? "这一科还没有记录" : "这一科记了 \(n) 个知识点"
+                                }()) { showWeak = true }
+                                .padding(.horizontal, T.pad).padding(.vertical, 14)
+                            }
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
@@ -278,6 +310,11 @@ struct DeckView: View {
                 }
                 .fullScreenCover(isPresented: $showStudy) { StudyView(deckID: deckID) }
                 .fullScreenCover(isPresented: $showQuiz) { QuizView(deckID: deckID) }
+                .fullScreenCover(isPresented: $showExam) { ExamView(deckID: deckID) }
+                .sheet(isPresented: $showExamHistory) { ExamHistoryView(deckID: deckID) }
+                .sheet(isPresented: $showWeak) {
+                    WeakPointsView(deckID: deckID, deckName: deck.name)
+                }
                 .sheet(isPresented: $showImport) { ImportView(deckID: deckID) }
                 .sheet(isPresented: $showNewCard) { CardEditView(deckID: deckID, cardID: nil) }
             } else {
@@ -287,6 +324,17 @@ struct DeckView: View {
                 }
             }
         }
+    }
+
+    private func examSubtitle(_ deck: Deck) -> String {
+        if deck.cards.filter({ $0.hasText }).count < 10 {
+            return "卡片满 10 张才能考"
+        }
+        guard let last = deck.lastExam, let days = deck.daysSinceExam else {
+            return "从没考过。全库随机抽题，闭卷"
+        }
+        if deck.examDue { return "上次 \(last.rate) 分，已经 \(days) 天了" }
+        return "上次 \(last.rate) 分，\(30 - days) 天后可以再考"
     }
 
     private func countPill(_ name: String, _ n: Int, _ color: Color) -> some View {
@@ -849,7 +897,7 @@ struct ImportView: View {
             }
             .fileImporter(isPresented: $showFilePicker,
                           allowedContentTypes: [.plainText, .commaSeparatedText, .text],
-                          allowsMultipleSelection: false) { res in
+                          allowsMultipleSelection: true) { res in
                 handleFile(res)
             }
         }
@@ -862,25 +910,38 @@ struct ImportView: View {
         case .failure(let e):
             fileError = "打不开：\(e.localizedDescription)"
         case .success(let urls):
-            guard let url = urls.first else { return }
-            let needsStop = url.startAccessingSecurityScopedResource()
-            defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
-            guard let data = try? Data(contentsOf: url) else {
-                fileError = "读不出这个文件。"
+            guard !urls.isEmpty else { return }
+            var chunks: [String] = []
+            var names: [String] = []
+            var failed: [String] = []
+
+            for url in urls {
+                let needsStop = url.startAccessingSecurityScopedResource()
+                defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
+                guard let data = try? Data(contentsOf: url) else {
+                    failed.append(url.lastPathComponent); continue
+                }
+                // 大多是 UTF-8；再兜一层 GB18030，Windows 上导出的表格常见
+                let content = String(data: data, encoding: .utf8)
+                    ?? String(data: data, encoding: String.Encoding(
+                        rawValue: CFStringConvertEncodingToNSStringEncoding(
+                            CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue))))
+                guard let content, !content.isEmpty else {
+                    failed.append(url.lastPathComponent); continue
+                }
+                chunks.append(content)
+                names.append(url.lastPathComponent)
+            }
+
+            guard !chunks.isEmpty else {
+                fileError = "一个都读不出来。编码认不出的话，另存成 UTF-8 再试。"
                 return
             }
-            // 大多是 UTF-8；再兜一层 GB18030，Windows 上导出的表格常见
-            let content = String(data: data, encoding: .utf8)
-                ?? String(data: data, encoding: String.Encoding(
-                    rawValue: CFStringConvertEncodingToNSStringEncoding(
-                        CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue))))
-            guard let content, !content.isEmpty else {
-                fileError = "这个文件的编码认不出来，另存成 UTF-8 再试。"
-                return
-            }
-            text = content
-            loadedName = url.lastPathComponent
-            mode = ImportMode.guess(from: url.lastPathComponent)
+            // 多个文件之间空一行拼起来，两种格式都不会串行
+            text = chunks.joined(separator: "\n\n")
+            loadedName = names.count == 1 ? names[0] : "\(names.count) 个文件：" + names.joined(separator: "、")
+            mode = ImportMode.guess(from: names[0])
+            if !failed.isEmpty { fileError = "这几个没读进来：" + failed.joined(separator: "、") }
             result = nil
         }
     }

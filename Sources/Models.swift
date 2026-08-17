@@ -32,8 +32,10 @@ struct Card: Codable, Identifiable, Equatable {
     var quizBank: [StoredQuiz] = []
     /// 上一次 AI 出题答错没有。错了下次就出全新的，不复用
     var lastQuizWrong: Bool = false
-    /// 按过几次「太难了」。每按一次难度往下压一档，答对一次回一档
-    var quizTooHard: Int = 0
+    /// 出题难度：0 认得出 / 1 会套用 / 2 会变形。从最低档起步，答对了才往上走
+    var quizLevel: Int = 0
+    /// 当前档连对几次。连对两次升一档
+    var quizStreak: Int = 0
 
     init(front: String = "", back: String = "") {
         self.front = front
@@ -59,7 +61,8 @@ struct Card: Codable, Identifiable, Equatable {
         lastReview = try? c.decodeIfPresent(Date.self, forKey: .lastReview) ?? nil
         quizBank   = (try? c.decode([StoredQuiz].self, forKey: .quizBank)) ?? []
         lastQuizWrong = (try? c.decode(Bool.self, forKey: .lastQuizWrong)) ?? false
-        quizTooHard   = (try? c.decode(Int.self,  forKey: .quizTooHard))   ?? 0
+        quizLevel     = (try? c.decode(Int.self,  forKey: .quizLevel))     ?? 0
+        quizStreak    = (try? c.decode(Int.self,  forKey: .quizStreak))    ?? 0
     }
 
     var stateName: String {
@@ -82,10 +85,38 @@ struct Card: Codable, Identifiable, Equatable {
     }
 }
 
+/// 一次月考的成绩
+struct ExamRecord: Codable, Identifiable, Equatable {
+    var id: UUID = UUID()
+    var date: Date = Date()
+    var total: Int = 0
+    var correct: Int = 0
+    /// 判分的平均分，比对错率细一点
+    var avgScore: Int = 0
+    /// 这次考砸的知识点
+    var weakTags: [String] = []
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id       = (try? c.decode(UUID.self,     forKey: .id))       ?? UUID()
+        date     = (try? c.decode(Date.self,     forKey: .date))     ?? Date()
+        total    = (try? c.decode(Int.self,      forKey: .total))    ?? 0
+        correct  = (try? c.decode(Int.self,      forKey: .correct))  ?? 0
+        avgScore = (try? c.decode(Int.self,      forKey: .avgScore)) ?? 0
+        weakTags = (try? c.decode([String].self, forKey: .weakTags)) ?? []
+    }
+
+    var rate: Int { total == 0 ? 0 : Int((Double(correct) / Double(total) * 100).rounded()) }
+}
+
 struct Deck: Codable, Identifiable, Equatable {
     var id: UUID = UUID()
     var name: String = ""
     var cards: [Card] = []
+    /// 历次月考成绩，按时间正序
+    var exams: [ExamRecord] = []
 
     init(name: String = "", cards: [Card] = []) {
         self.name = name
@@ -97,6 +128,21 @@ struct Deck: Codable, Identifiable, Equatable {
         id    = (try? c.decode(UUID.self,   forKey: .id))    ?? UUID()
         name  = (try? c.decode(String.self, forKey: .name))  ?? ""
         cards = (try? c.decode([Card].self, forKey: .cards)) ?? []
+        exams = (try? c.decode([ExamRecord].self, forKey: .exams)) ?? []
+    }
+
+    var lastExam: ExamRecord? { exams.last }
+
+    /// 够不够格开考：卡片够多，且从没考过或者上次考完满一个月了
+    var examDue: Bool {
+        guard cards.filter({ $0.hasText }).count >= 10 else { return false }
+        guard let last = lastExam else { return true }
+        return Date().timeIntervalSince(last.date) >= 30 * 86400
+    }
+
+    var daysSinceExam: Int? {
+        guard let last = lastExam else { return nil }
+        return Int(Date().timeIntervalSince(last.date) / 86400)
     }
 
     func dueCards(at date: Date = Date()) -> [Card] {
@@ -505,19 +551,42 @@ final class Store: ObservableObject {
         }
     }
 
-    func setLastQuizWrong(_ wrong: Bool, cardID: UUID, in deckID: UUID) {
+    /// 答完一题：记对错，按表现升降档。返回档位变没变，好在界面上说一声
+    @discardableResult
+    func recordQuizResult(correct: Bool, cardID: UUID, in deckID: UUID) -> LevelChange {
+        var change = LevelChange.none
         withCard(deckID, cardID) { card in
-            card.lastQuizWrong = wrong
-            // 答对了就把之前压下去的难度放回来一档
-            if !wrong { card.quizTooHard = max(0, card.quizTooHard - 1) }
+            card.lastQuizWrong = !correct
+            let before = card.quizLevel
+            if correct {
+                card.quizStreak += 1
+                if card.quizStreak >= QuizPlanner.promoteAfter && card.quizLevel < 2 {
+                    card.quizLevel += 1
+                    card.quizStreak = 0
+                }
+            } else {
+                card.quizStreak = 0
+                card.quizLevel = max(0, card.quizLevel - 1)
+            }
+            if card.quizLevel > before { change = .up(card.quizLevel) }
+            else if card.quizLevel < before { change = .down(card.quizLevel) }
         }
+        return change
     }
 
-    /// 按了「太难了」：这张卡往下压一档，并且把刚才那道题从库里扔掉
-    func markTooHard(quizID: UUID?, cardID: UUID, in deckID: UUID) {
+    func addExam(_ record: ExamRecord, to deckID: UUID) {
+        guard let di = index(of: deckID) else { return }
+        decks[di].exams.append(record)
+        if decks[di].exams.count > 24 { decks[di].exams.removeFirst() }
+        save()
+    }
+
+    /// 手动升降一档。降档时顺手把刚才那道题从库里扔掉
+    func nudgeQuizLevel(by delta: Int, dropQuiz quizID: UUID?, cardID: UUID, in deckID: UUID) {
         withCard(deckID, cardID) { card in
-            card.quizTooHard = min(2, card.quizTooHard + 1)
-            if let quizID { card.quizBank.removeAll { $0.id == quizID } }
+            card.quizLevel = min(2, max(0, card.quizLevel + delta))
+            card.quizStreak = 0
+            if delta < 0, let quizID { card.quizBank.removeAll { $0.id == quizID } }
         }
     }
 

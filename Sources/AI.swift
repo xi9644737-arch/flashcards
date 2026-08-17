@@ -135,22 +135,28 @@ enum QuizLevel: Int, Codable, CaseIterable, Identifiable {
         }
     }
 
-    func lowered(by n: Int) -> QuizLevel {
-        QuizLevel(rawValue: max(0, rawValue - n)) ?? .recall
+    /// 这张卡当前在第几档。纯看答题表现，不看日历
+    static func current(for card: Card) -> QuizLevel {
+        QuizLevel(rawValue: card.quizLevel) ?? .recall
     }
+}
 
-    /// 按这张卡练到什么程度，自动定档
-    static func auto(for card: Card) -> QuizLevel {
-        var base: QuizLevel
-        if card.state != 2 {
-            base = .recall                      // 还没毕业，先只考认得出
-        } else if card.stability < 21 {
-            base = .apply                       // 记住了，考套用
-        } else {
-            base = .transfer                    // 熟了，才允许变形
+/// 档位变化，用来在界面上提示一句
+enum LevelChange: Equatable {
+    case none
+    case up(Int)
+    case down(Int)
+
+    var text: String? {
+        switch self {
+        case .none: return nil
+        case .up(let l):
+            let name = QuizLevel(rawValue: l)?.label ?? ""
+            return "连对两次，升档了。下一题开始考「\(name)」。"
+        case .down(let l):
+            let name = QuizLevel(rawValue: l)?.label ?? ""
+            return "降回「\(name)」，先把这一档踩实。"
         }
-        // 按过「太难了」就往下压
-        return base.lowered(by: card.quizTooHard)
     }
 }
 
@@ -210,6 +216,8 @@ enum QuizPlan {
 }
 
 enum QuizPlanner {
+    /// 连对几次升一档
+    static let promoteAfter = 2
     /// 题库存到几道就可以开始复用
     static let minBank = 3
     /// 最多存几道原题
@@ -231,6 +239,14 @@ enum QuizPlanner {
         if candidate.uses == 0 { return .reuse(candidate) }
         // 见过了，换个数字换个情境，免得变成背答案
         return .variant(candidate)
+    }
+
+    /// 考试用：不许原样复用，见过的题一律出变体
+    static func examPlan(for card: Card) -> QuizPlan {
+        switch plan(for: card) {
+        case .reuse(let s): return .variant(s)
+        case let other:     return other
+        }
     }
 
     /// 断网或者接口挂了的兜底：库里随便挑一道最久没见的
@@ -285,7 +301,9 @@ final class AIStore: ObservableObject {
     @Published var settings: AISettings {
         didSet { saveSettings() }
     }
-    @Published var tags: [String: TagStat] = [:]
+    /// 薄弱点**按牌组分开存**。一个牌组一科，
+    /// 混在一起的话考数学会把「电离平衡」当薄弱点喂进 prompt
+    @Published var tagsByDeck: [String: [String: TagStat]] = [:]
 
     private let settingsKey = "ai.settings.v1"
 
@@ -311,36 +329,50 @@ final class AIStore: ObservableObject {
     }
 
     private func loadTags() {
-        guard let d = try? Data(contentsOf: tagsURL),
-              let t = try? JSONDecoder().decode([String: TagStat].self, from: d) else { return }
-        tags = t
+        guard let d = try? Data(contentsOf: tagsURL) else { return }
+        if let byDeck = try? JSONDecoder().decode([String: [String: TagStat]].self, from: d) {
+            tagsByDeck = byDeck
+            return
+        }
+        // 旧版是不分科的一张表，读进来放进「未分科」，不丢数据
+        if let flat = try? JSONDecoder().decode([String: TagStat].self, from: d), !flat.isEmpty {
+            tagsByDeck["legacy"] = flat
+            saveTags()
+        }
     }
 
     private func saveTags() {
-        guard let d = try? JSONEncoder().encode(tags) else { return }
+        guard let d = try? JSONEncoder().encode(tagsByDeck) else { return }
         try? d.write(to: tagsURL, options: .atomic)
     }
 
-    func record(_ judgement: Judgement) {
+    func tags(for deckID: UUID) -> [String: TagStat] {
+        tagsByDeck[deckID.uuidString] ?? [:]
+    }
+
+    func record(_ judgement: Judgement, deckID: UUID) {
+        let key = deckID.uuidString
+        var table = tagsByDeck[key] ?? [:]
         for raw in judgement.tags {
             let t = raw.trimmingCharacters(in: .whitespaces)
             guard !t.isEmpty, t.count <= 20 else { continue }
-            var s = tags[t] ?? TagStat(tag: t)
+            var s = table[t] ?? TagStat(tag: t)
             if judgement.correct { s.right += 1 } else { s.wrong += 1 }
             s.lastSeen = Date()
-            tags[t] = s
+            table[t] = s
         }
+        tagsByDeck[key] = table
         saveTags()
     }
 
-    func clearTags() {
-        tags = [:]
+    func clearTags(deckID: UUID) {
+        tagsByDeck[deckID.uuidString] = nil
         saveTags()
     }
 
-    /// 最该练的几个知识点
-    func weakest(_ n: Int) -> [TagStat] {
-        tags.values
+    /// 这一科里最该练的几个知识点
+    func weakest(_ n: Int, deckID: UUID) -> [TagStat] {
+        tags(for: deckID).values
             .filter { $0.wrong > 0 }
             .sorted {
                 if $0.weakness == $1.weakness { return $0.wrong > $1.wrong }
@@ -350,11 +382,16 @@ final class AIStore: ObservableObject {
             .map { $0 }
     }
 
-    var sortedAll: [TagStat] {
-        tags.values.sorted {
+    func sortedAll(deckID: UUID) -> [TagStat] {
+        tags(for: deckID).values.sorted {
             if $0.weakness == $1.weakness { return $0.total > $1.total }
             return $0.weakness > $1.weakness
         }
+    }
+
+    /// 全部科目一共记了多少个知识点，只用来在列表页显示个数
+    var totalTagCount: Int {
+        tagsByDeck.values.reduce(0) { $0 + $1.count }
     }
 }
 
@@ -545,7 +582,7 @@ struct AIClient {
     }
 
     /// 判分
-    func judge(quiz: Quiz, answer: String, card: Card) async throws -> Judgement {
+    func judge(quiz: Quiz, answer: String, card: Card, strict: Bool = false) async throws -> Judgement {
         let user = """
         题目：\(quiz.question)
         参考答案：\(quiz.reference)
@@ -553,7 +590,8 @@ struct AIClient {
         学生作答：\(answer.isEmpty ? "（空着没答）" : answer)
         """
 
-        let raw = try await chat(system: AIClient.judgeSystem, user: user, temperature: 0.2)
+        let raw = try await chat(system: strict ? AIClient.judgeStrictSystem : AIClient.judgeSystem,
+                                 user: user, temperature: 0.2)
 
         guard let json = AIClient.extractJSON(raw),
               let data = json.data(using: .utf8),
@@ -581,6 +619,32 @@ struct AIClient {
     {"kind":"reverse","question":"","reference":"","hint":""}
     """
 
+    private static let judgeStrictSystem = """
+    你是月考的阅卷老师。
+
+    用户会给你：题目、参考答案、这道题考的原始公式卡、学生的作答。
+    你判断学生答得对不对。
+
+    这是考试，不是练习。不给同情分：
+    - 结果错了就是错，方向对、思路对但算错，一样算错
+    - 只答对一半、含糊其辞、写「大概是」「应该是」，算错
+    - 空着、跑题、答非所问，算错
+    - 不要因为「看得出他懂」就放过
+
+    但有一条不算错：
+    - 学生在手机上打字。符号、括号、上下标的笔误，只要数学含义没变，算对
+    - 数学上等价的写法算对。-b/2a、−b/(2a)、x=-b/2a 是同一个答案
+
+    各字段怎么填：
+    - comment：讲清楚判对判错的依据。错的话把正确思路完整说一遍
+    - wrongStep：具体错在哪一步。答对就填空字符串
+    - tags：这道题涉及的知识点，2 到 4 个短词，用统一的叫法
+    - score：0 到 100，按考试标准给，别虚高
+
+    只输出 JSON，不要 markdown 代码块，不要任何多余的话，格式：
+    {"correct":true,"score":0,"comment":"","wrongStep":"","tags":[]}
+    """
+
     /// 拿一道旧题现生成变体。prompt 比出新题小得多
     func makeVariant(of stored: StoredQuiz, card: Card) async throws -> Quiz {
         let user = """
@@ -598,6 +662,56 @@ struct AIClient {
         else { throw AIError.badJSON(raw) }
 
         return quiz
+    }
+
+    private static let makeCardsSystem = """
+    你是一个公式卡片生成器。
+
+    用户给你一个范围（比如「高中数学 导数」「初中物理 电学」）和一个数量。
+    你生成对应数量的公式记忆卡。
+
+    每张卡两面：
+    - front：公式的名字，或者一句话描述这条公式管什么。要具体，别写「公式一」这种
+    - back：公式本身，加一句极短的用法或者记忆提示
+
+    硬性要求：
+    - 一张卡只放一条公式。有多个变体的拆成多张
+    - 公式用普通文本写，可以用 ² ³ ₙ √ π ≤ ∫ 这类字符，不要用 LaTeX，不要写 $ 和反斜杠
+    - back 里那句提示不超过十五个字，写"怎么用"或者"怎么记"，不要复述公式
+    - 按教材里的通常顺序排，从基础到进阶
+    - 用户会给出已有的卡片正面清单，不要生成和它们重复的
+
+    只输出 JSON，不要 markdown 代码块，不要任何多余的话，格式：
+    {"cards":[{"front":"","back":""}]}
+    """
+
+    /// 让 AI 按主题批量造卡
+    func generateCards(topic: String, count: Int, existingFronts: [String]) async throws -> [Card] {
+        let existing = existingFronts.prefix(80).joined(separator: "、")
+        let user = """
+        范围：\(topic)
+        数量：\(count)
+        已有的卡（别重复）：\(existing.isEmpty ? "（还没有）" : existing)
+        """
+
+        let raw = try await chat(system: AIClient.makeCardsSystem, user: user, temperature: 0.7)
+
+        struct Pack: Decodable {
+            struct Item: Decodable { let front: String?; let back: String? }
+            let cards: [Item]?
+        }
+        guard let json = AIClient.extractJSON(raw),
+              let data = json.data(using: .utf8),
+              let pack = try? JSONDecoder().decode(Pack.self, from: data),
+              let items = pack.cards, !items.isEmpty
+        else { throw AIError.badJSON(raw) }
+
+        return items.compactMap { item in
+            let f = (item.front ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let b = (item.back ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !f.isEmpty, !b.isEmpty else { return nil }
+            return Card(front: f, back: b)
+        }
     }
 
     /// 拉可用模型列表。OpenCode Go、硅基流动、OpenRouter 都支持；Zen 不支持，会报 404

@@ -19,7 +19,9 @@ struct QuizView: View {
     @State private var showHint = false
     @State private var planLabel: String?
     @State private var servedQuizID: UUID?
-    @State private var currentLevel: QuizLevel = .apply
+    @State private var currentLevel: QuizLevel = .recall
+    @State private var levelChange: LevelChange = .none
+    @State private var showCheatsheet = false
     @FocusState private var focused: Bool
 
     private var deckIndex: Int? { store.index(of: deckID) }
@@ -132,18 +134,32 @@ struct QuizView: View {
                         }
 
                         if judgement == nil {
-                            Button {
-                                tooHard()
-                            } label: {
-                                HStack(spacing: 5) {
-                                    Image(systemName: "arrow.down.right.circle")
-                                    Text(currentLevel == .recall
-                                         ? "这题太难了，换一道（已经是最低档）"
-                                         : "这题太难了，降一档重出")
+                            HStack(spacing: 14) {
+                                Button {
+                                    nudge(-1)
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "arrow.down.right.circle")
+                                        Text(currentLevel == .recall ? "换一道" : "太难了，降一档")
+                                    }
                                 }
-                                .font(T.sans(13))
-                                .foregroundColor(T.dim)
+                                .disabled(loading)
+
+                                Button {
+                                    nudge(1)
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "arrow.up.right.circle")
+                                        Text("太简单了，升一档")
+                                    }
+                                }
+                                .disabled(loading || currentLevel == .transfer)
+                                .opacity(currentLevel == .transfer ? 0.35 : 1)
+
+                                Spacer()
                             }
+                            .font(T.sans(13))
+                            .foregroundColor(T.dim)
                             .padding(.leading, 4)
                         }
 
@@ -168,6 +184,24 @@ struct QuizView: View {
                     }
 
                     if let j = judgement { resultBox(j) }
+
+                    if let t = levelChange.text {
+                        HStack(spacing: 8) {
+                            Image(systemName: levelChange == .none ? "" :
+                                    (t.contains("升档") ? "arrow.up.circle.fill" : "arrow.down.circle.fill"))
+                            Text(t).fixedSize(horizontal: false, vertical: true)
+                        }
+                        .font(T.sans(13))
+                        .foregroundColor(t.contains("升档") ? T.green : T.amber)
+                        .padding(13)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background((t.contains("升档") ? T.green : T.amber).opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    } else if judgement != nil, let c = card, c.quizStreak > 0 {
+                        Text("这一档已经连对 \(c.quizStreak) 次，再对 \(QuizPlanner.promoteAfter - c.quizStreak) 次升档。")
+                            .font(T.sans(12.5)).foregroundColor(T.faint)
+                            .padding(.leading, 4)
+                    }
                 }
                 .padding(.horizontal, 18)
                 .padding(.bottom, 24)
@@ -180,7 +214,37 @@ struct QuizView: View {
 
     private var answerBox: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(text: "你的作答")
+            HStack {
+                SectionLabel(text: "你的作答")
+                Spacer()
+                Button {
+                    answer = MathInput.expand(answer)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "wand.and.stars")
+                        Text("转符号")
+                    }
+                    .font(T.sans(12.5))
+                    .foregroundColor(T.accent)
+                }
+                Button {
+                    showCheatsheet.toggle()
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                        .font(.system(size: 13))
+                        .foregroundColor(T.faint)
+                }
+            }
+
+            if showCheatsheet {
+                Text(MathInput.cheatsheet)
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .foregroundColor(T.dim)
+                    .padding(11)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(T.sunken)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
@@ -369,13 +433,13 @@ struct QuizView: View {
         guard let card else { return }
         quiz = nil; judgement = nil; answer = ""
         showHint = false; errorText = nil; planLabel = nil
-        servedQuizID = nil; loading = true
+        servedQuizID = nil; levelChange = .none; loading = true
 
         let client = AIClient(settings: ai.settings)
-        let weak = ai.weakest(ai.settings.weakHintCount)
+        let weak = ai.weakest(ai.settings.weakHintCount, deckID: deckID)
         let plan: QuizPlan = forceFresh ? .fresh : QuizPlanner.plan(for: card)
         let cid = card.id
-        let level = ai.settings.autoLevel ? QuizLevel.auto(for: card) : ai.settings.fixedLevel
+        let level = ai.settings.autoLevel ? QuizLevel.current(for: card) : ai.settings.fixedLevel
         currentLevel = level
 
         Task {
@@ -442,10 +506,11 @@ struct QuizView: View {
                 let j = try await client.judge(quiz: quiz, answer: answer, card: card)
                 await MainActor.run {
                     judgement = j
-                    ai.record(j)
+                    ai.record(j, deckID: deckID)
                     judging = false
-                    // 错了下次就出全新的，不拿旧题糊弄
-                    store.setLastQuizWrong(!j.correct, cardID: card.id, in: deckID)
+                    // 记对错，并按表现升降档
+                    levelChange = store.recordQuizResult(
+                        correct: j.correct, cardID: card.id, in: deckID)
                 }
             } catch {
                 await MainActor.run {
@@ -456,10 +521,11 @@ struct QuizView: View {
         }
     }
 
-    /// 太难了：这张卡降一档，扔掉这道题，重出
-    private func tooHard() {
+    /// 手动升降一档，然后重出一道
+    private func nudge(_ delta: Int) {
         guard let cid = cardID else { return }
-        store.markTooHard(quizID: servedQuizID, cardID: cid, in: deckID)
+        store.nudgeQuizLevel(by: delta, dropQuiz: delta < 0 ? servedQuizID : nil,
+                             cardID: cid, in: deckID)
         loadQuiz(forceFresh: true)
     }
 
@@ -646,7 +712,7 @@ struct AISettingsView: View {
                                 .labelsHidden()
                         }
                     }
-                    Text("每次出题会把你错得最多的这几个知识点告诉模型，让它专挑这些考。填 0 就是随机出。")
+                    Text("每次出题会把这一科里你错得最多的几个知识点告诉模型，让它专挑这些考。填 0 就是随机出。薄弱点按牌组分开记，不会串科。")
                         .font(T.sans(12)).foregroundColor(T.faint)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.leading, 4)
@@ -740,12 +806,16 @@ struct AISettingsView: View {
 struct WeakPointsView: View {
     @EnvironmentObject var ai: AIStore
     @Environment(\.dismiss) private var dismiss
+    let deckID: UUID
+    let deckName: String
     @State private var showClear = false
+
+    private var rows: [TagStat] { ai.sortedAll(deckID: deckID) }
 
     var body: some View {
         NavigationStack {
-            Screen(title: "薄弱点", subtitle: ai.tags.isEmpty ? nil : "按该练的程度排") {
-                if ai.sortedAll.isEmpty {
+            Screen(title: "薄弱点", subtitle: rows.isEmpty ? deckName : "\(deckName) · 按该练的程度排") {
+                if rows.isEmpty {
                     Panel {
                         Text("还没有记录。做几道 AI 出的题就有了。")
                             .font(T.sans(14)).foregroundColor(T.dim)
@@ -753,7 +823,7 @@ struct WeakPointsView: View {
                 } else {
                     Panel(padding: 0) {
                         VStack(spacing: 0) {
-                            ForEach(Array(ai.sortedAll.enumerated()), id: \.element.tag) { idx, s in
+                            ForEach(Array(rows.enumerated()), id: \.element.tag) { idx, s in
                                 HStack(spacing: 12) {
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(s.tag)
@@ -774,14 +844,14 @@ struct WeakPointsView: View {
                                 }
                                 .padding(.horizontal, T.pad).padding(.vertical, 13)
 
-                                if idx < ai.sortedAll.count - 1 {
+                                if idx < rows.count - 1 {
                                     Hair().padding(.leading, T.pad)
                                 }
                             }
                         }
                     }
 
-                    Text("百分比是「下一次还会错」的粗略估计。样本少的时候会往中间收，不会因为错一次就冲到 100%。出题时优先挑排在前面的。")
+                    Text("百分比是「下一次还会错」的粗略估计。样本少的时候会往中间收，不会因为错一次就冲到 100%。出题时优先挑排在前面的。\n\n每个牌组的薄弱点分开记，考数学不会被物理的错处干扰。")
                         .font(T.sans(12.5)).foregroundColor(T.faint)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.leading, 4)
@@ -801,9 +871,9 @@ struct WeakPointsView: View {
                     Button("完成") { dismiss() }.tint(T.accent)
                 }
             }
-            .alert("清空全部薄弱点记录？", isPresented: $showClear) {
+            .alert("清空「\(deckName)」的薄弱点记录？", isPresented: $showClear) {
                 Button("取消", role: .cancel) { }
-                Button("清空", role: .destructive) { ai.clearTags() }
+                Button("清空", role: .destructive) { ai.clearTags(deckID: deckID) }
             }
         }
         .tint(T.accent)
