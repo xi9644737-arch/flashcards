@@ -1,0 +1,54 @@
+name: 打包 ipa
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: 拉代码
+        uses: actions/checkout@v4
+
+      - name: 装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 编译（不签名）
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project FlashCards.xcodeproj \
+            -scheme FlashCards \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: 打成 ipa
+        run: |
+          APP="build/Build/Products/Release-iphoneos/FlashCards.app"
+          if [ ! -d "$APP" ]; then
+            echo "没找到 .app，编译大概失败了"
+            find build -name "*.app" -maxdepth 6 || true
+            exit 1
+          fi
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry FlashCards.ipa Payload
+          ls -lh FlashCards.ipa
+
+      - name: 上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlashCards-ipa
+          path: FlashCards.ipa
+          retention-days: 30
