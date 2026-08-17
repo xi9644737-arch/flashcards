@@ -16,14 +16,41 @@ struct AISettings: Codable, Equatable {
             && !model.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    /// 拼出最终的 chat/completions 地址，容忍用户填不填 /v1
-    var endpoint: URL? {
+    /// 归一化成带 /v1 的根地址。填 .../zen/go 或 .../zen/go/v1 都能对
+    var root: String {
         var s = baseURL.trimmingCharacters(in: .whitespaces)
         while s.hasSuffix("/") { s.removeLast() }
-        if s.hasSuffix("/chat/completions") { return URL(string: s) }
-        if s.hasSuffix("/v1") { return URL(string: s + "/chat/completions") }
-        return URL(string: s + "/v1/chat/completions")
+        if s.hasSuffix("/chat/completions") {
+            s = String(s.dropLast("/chat/completions".count))
+        }
+        if !s.hasSuffix("/v1") { s += "/v1" }
+        return s
     }
+
+    var endpoint: URL? { URL(string: root + "/chat/completions") }
+    var modelsEndpoint: URL? { URL(string: root + "/models") }
+}
+
+/// 几个常用接口，填的时候可以直接点
+struct Preset: Identifiable {
+    var id: String { name }
+    let name: String
+    let url: String
+    let model: String
+    let note: String
+
+    static let all: [Preset] = [
+        .init(name: "OpenCode Go", url: "https://opencode.ai/zen/go/v1",
+              model: "", note: "订阅制。有 /v1/models，模型可以拉取"),
+        .init(name: "OpenCode Zen", url: "https://opencode.ai/zen/v1",
+              model: "", note: "按量付费。没有 /v1/models，模型名要手填"),
+        .init(name: "DeepSeek", url: "https://api.deepseek.com",
+              model: "deepseek-chat", note: "便宜，中文数学够用"),
+        .init(name: "硅基流动", url: "https://api.siliconflow.cn/v1",
+              model: "", note: "国内，模型多"),
+        .init(name: "OpenRouter", url: "https://openrouter.ai/api/v1",
+              model: "", note: "聚合，什么模型都有"),
+    ]
 }
 
 // MARK: - 题目与判分
@@ -342,6 +369,45 @@ struct AIClient {
         else { throw AIError.badJSON(raw) }
 
         return j
+    }
+
+    /// 拉可用模型列表。OpenCode Go、硅基流动、OpenRouter 都支持；Zen 不支持，会报 404
+    func listModels() async throws -> [String] {
+        guard !settings.apiKey.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw AIError.notConfigured
+        }
+        guard let url = settings.modelsEndpoint else { throw AIError.badURL }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 30
+        req.setValue("Bearer \(settings.apiKey.trimmingCharacters(in: .whitespaces))",
+                     forHTTPHeaderField: "Authorization")
+
+        let data: Data
+        let resp: URLResponse
+        do {
+            (data, resp) = try await URLSession.shared.data(for: req)
+        } catch {
+            throw AIError.network(error.localizedDescription)
+        }
+
+        if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw AIError.http(http.statusCode,
+                               http.statusCode == 404
+                               ? "这个接口没有 /v1/models，模型名只能手填。"
+                               : (String(data: data, encoding: .utf8) ?? ""))
+        }
+
+        struct ModelList: Decodable {
+            struct Item: Decodable { let id: String }
+            let data: [Item]?
+        }
+        guard let decoded = try? JSONDecoder().decode(ModelList.self, from: data),
+              let items = decoded.data, !items.isEmpty
+        else { throw AIError.badJSON(String(data: data, encoding: .utf8) ?? "") }
+
+        return items.map { $0.id }.sorted()
     }
 
     func testConnection() async throws -> String {
