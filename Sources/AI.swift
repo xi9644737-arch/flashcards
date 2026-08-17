@@ -9,6 +9,10 @@ struct AISettings: Codable, Equatable {
     var model: String = "deepseek-v4-flash"
     /// 出题时最多参考几个薄弱知识点
     var weakHintCount: Int = 5
+    /// 难度是否跟着掌握程度自动走
+    var autoLevel: Bool = true
+    /// 关掉自动时用的固定难度
+    var fixedLevel: QuizLevel = .apply
 
     var configured: Bool {
         !apiKey.trimmingCharacters(in: .whitespaces).isEmpty
@@ -94,6 +98,59 @@ struct Quiz: Codable, Identifiable, Equatable {
         reference = (try? c.decode(String.self, forKey: .reference)) ?? ""
         hint      = (try? c.decode(String.self, forKey: .hint))      ?? ""
         id = UUID()
+    }
+}
+
+// MARK: - 难度
+
+enum QuizLevel: Int, Codable, CaseIterable, Identifiable {
+    case recall = 0    // 认得出
+    case apply         // 会套用
+    case transfer      // 会变形
+
+    var id: Int { rawValue }
+
+    var label: String {
+        switch self {
+        case .recall:   return "认得出"
+        case .apply:    return "会套用"
+        case .transfer: return "会变形"
+        }
+    }
+
+    var blurb: String {
+        switch self {
+        case .recall:   return "只考公式本身，一步都不用算"
+        case .apply:    return "给一组数字，直接代进去算一次"
+        case .transfer: return "允许一次变形或反解，最多三步"
+        }
+    }
+
+    /// 发给模型的那个词
+    var promptName: String {
+        switch self {
+        case .recall:   return "认得出"
+        case .apply:    return "会套用"
+        case .transfer: return "会变形"
+        }
+    }
+
+    func lowered(by n: Int) -> QuizLevel {
+        QuizLevel(rawValue: max(0, rawValue - n)) ?? .recall
+    }
+
+    /// 按这张卡练到什么程度，自动定档
+    static func auto(for card: Card) -> QuizLevel {
+        var base: QuizLevel
+        if card.state != 2 {
+            base = .recall                      // 还没毕业，先只考认得出
+        } else if card.stability < 21 {
+            base = .apply                       // 记住了，考套用
+        } else {
+            base = .transfer                    // 熟了，才允许变形
+        }
+        // 按过「太难了」就往下压
+        return base.lowered(by: card.quizTooHard)
     }
 }
 
@@ -389,22 +446,52 @@ struct AIClient {
     // 顺序反了的话（长规则在变量后面）公共前缀就只剩几个字，等于没有缓存。
 
     private static let quizSystem = """
-    你是一个数学公式训练的出题器。
+    你是一个公式记忆训练的出题器。
 
-    用户会给你一张公式卡的正面和背面，以及这个学生最近做错过的知识点。
-    你据此出一道题。
+    先记住这件事：学生是在**背一张公式卡**，不是在做卷子。
+    这张卡上只有一条公式。你出的题只能围绕这一条公式，考他记没记住、会不会直接用。
+    出难题是失职，不是尽责。
 
-    题型三选一，优先挑能戳到学生弱点的那一种：
-    1. reverse —— 给出结果、形式或者一句描述，让学生说出对应的公式
-    2. scenario —— 给一个具体的小情景或小题目，让学生说该用哪个公式、怎么代进去
-    3. cloze —— 把公式挖掉一部分，让学生把缺的补出来
+    用户会给你：一张公式卡的正面和背面、这个学生最近做错过的知识点、以及一个难度档。
 
-    硬性要求：
-    - 一两句话或者一个式子就能作答，不要出需要长篇演算的大题
+    ── 难度三档，用户指定哪一档你就出哪一档 ──
+
+    认得出：只考这条公式本身。给结果要公式、给公式要名字、把公式挖空让他补。
+    　　　　一步都不用算。
+
+    会套用：给一组具体数字，让他把数字代进这条公式算一次，得到一个数。
+    　　　　只用这一条公式。不联立、不分类讨论、不需要先求别的量。
+
+    会变形：允许一次变形或者反解（比如已知结果反求某一项），
+    　　　　但仍然只围绕这一条公式，总步骤不超过三步。
+
+    ── 下面这些一律不许出，任何难度档都不许 ──
+
+    - 需要联立多个方程的
+    - 需要分类讨论的
+    - 需要先证明、先推导才能算的
+    - 需要用到这张卡以外的任何公式或定理的
+    - 需要设未知数、需要构造、需要技巧的
+    - 竞赛题、高考压轴题、多问的大题
+    - 数字刻意刁钻、算起来很烦的（用小整数，别用分数套根号）
+
+    宁可出简单了，也不许出难了。学生做不出来会放弃，那这张卡就白背了。
+
+    ── 题型三选一，优先挑能戳到学生弱点的那一种 ──
+
+    1. reverse —— 给出结果、形式或者一句描述，让他说出对应的公式
+    2. scenario —— 给一个很小的具体情景，让他说该用哪个公式、怎么代
+    3. cloze —— 把公式挖掉一部分，让他补出来
+
+    「会套用」和「会变形」档才能用 scenario，「认得出」档只能用 reverse 或 cloze。
+
+    ── 其它要求 ──
+
+    - 一两句话或者一个式子就能作答
     - 题面里不许出现答案
     - reference 写完整的参考答案
     - hint 写一句提示，给卡住的学生看，不要直接把答案说了
-    - 学生用手机作答，不要求写完整过程
+    - 学生用手机作答，不要求写过程
 
     只输出 JSON，不要 markdown 代码块，不要任何多余的话，格式：
     {"kind":"reverse","question":"","reference":"","hint":""}
@@ -434,12 +521,13 @@ struct AIClient {
     """
 
     /// 出题
-    func makeQuiz(card: Card, weak: [TagStat]) async throws -> Quiz {
+    func makeQuiz(card: Card, weak: [TagStat], level: QuizLevel) async throws -> Quiz {
         let weakLine = weak.isEmpty
             ? "（暂时没有记录）"
             : weak.map { "\($0.tag)（错 \($0.wrong) 次）" }.joined(separator: "、")
 
         let user = """
+        难度档：\(level.promptName)
         正面：\(card.front)
         背面：\(card.back)
         最近错过：\(weakLine)

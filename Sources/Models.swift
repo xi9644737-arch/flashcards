@@ -32,6 +32,8 @@ struct Card: Codable, Identifiable, Equatable {
     var quizBank: [StoredQuiz] = []
     /// 上一次 AI 出题答错没有。错了下次就出全新的，不复用
     var lastQuizWrong: Bool = false
+    /// 按过几次「太难了」。每按一次难度往下压一档，答对一次回一档
+    var quizTooHard: Int = 0
 
     init(front: String = "", back: String = "") {
         self.front = front
@@ -57,6 +59,7 @@ struct Card: Codable, Identifiable, Equatable {
         lastReview = try? c.decodeIfPresent(Date.self, forKey: .lastReview) ?? nil
         quizBank   = (try? c.decode([StoredQuiz].self, forKey: .quizBank)) ?? []
         lastQuizWrong = (try? c.decode(Bool.self, forKey: .lastQuizWrong)) ?? false
+        quizTooHard   = (try? c.decode(Int.self,  forKey: .quizTooHard))   ?? 0
     }
 
     var stateName: String {
@@ -503,7 +506,19 @@ final class Store: ObservableObject {
     }
 
     func setLastQuizWrong(_ wrong: Bool, cardID: UUID, in deckID: UUID) {
-        withCard(deckID, cardID) { $0.lastQuizWrong = wrong }
+        withCard(deckID, cardID) { card in
+            card.lastQuizWrong = wrong
+            // 答对了就把之前压下去的难度放回来一档
+            if !wrong { card.quizTooHard = max(0, card.quizTooHard - 1) }
+        }
+    }
+
+    /// 按了「太难了」：这张卡往下压一档，并且把刚才那道题从库里扔掉
+    func markTooHard(quizID: UUID?, cardID: UUID, in deckID: UUID) {
+        withCard(deckID, cardID) { card in
+            card.quizTooHard = min(2, card.quizTooHard + 1)
+            if let quizID { card.quizBank.removeAll { $0.id == quizID } }
+        }
     }
 
     /// 纯追加，不查重

@@ -19,6 +19,7 @@ struct QuizView: View {
     @State private var showHint = false
     @State private var planLabel: String?
     @State private var servedQuizID: UUID?
+    @State private var currentLevel: QuizLevel = .apply
     @FocusState private var focused: Bool
 
     private var deckIndex: Int? { store.index(of: deckID) }
@@ -119,6 +120,7 @@ struct QuizView: View {
                     if let quiz {
                         HStack(spacing: 6) {
                             Tag(text: quiz.kind.label, color: T.accent, bg: T.accentBg)
+                            Tag(text: currentLevel.label)
                             if let planLabel {
                                 Tag(text: planLabel)
                             }
@@ -127,6 +129,22 @@ struct QuizView: View {
                                 Button(showHint ? "收起提示" : "看提示") { showHint.toggle() }
                                     .font(T.sans(13)).foregroundColor(T.accent)
                             }
+                        }
+
+                        if judgement == nil {
+                            Button {
+                                tooHard()
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "arrow.down.right.circle")
+                                    Text(currentLevel == .recall
+                                         ? "这题太难了，换一道（已经是最低档）"
+                                         : "这题太难了，降一档重出")
+                                }
+                                .font(T.sans(13))
+                                .foregroundColor(T.dim)
+                            }
+                            .padding(.leading, 4)
                         }
 
                         Panel {
@@ -357,6 +375,8 @@ struct QuizView: View {
         let weak = ai.weakest(ai.settings.weakHintCount)
         let plan: QuizPlan = forceFresh ? .fresh : QuizPlanner.plan(for: card)
         let cid = card.id
+        let level = ai.settings.autoLevel ? QuizLevel.auto(for: card) : ai.settings.fixedLevel
+        currentLevel = level
 
         Task {
             do {
@@ -382,7 +402,7 @@ struct QuizView: View {
                     }
 
                 case .fresh:
-                    let q = try await client.makeQuiz(card: card, weak: weak)
+                    let q = try await client.makeQuiz(card: card, weak: weak, level: level)
                     await MainActor.run {
                         quiz = q
                         servedQuizID = nil
@@ -434,6 +454,13 @@ struct QuizView: View {
                 }
             }
         }
+    }
+
+    /// 太难了：这张卡降一档，扔掉这道题，重出
+    private func tooHard() {
+        guard let cid = cardID else { return }
+        store.markTooHard(quizID: servedQuizID, cardID: cid, in: deckID)
+        loadQuiz(forceFresh: true)
     }
 
     private func applyGrade(_ g: Grade) {
@@ -579,6 +606,36 @@ struct AISettingsView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
+                    SectionLabel(text: "题目难度")
+                    Panel {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Toggle("跟着掌握程度自动走", isOn: $ai.settings.autoLevel)
+                                .font(T.sans(15))
+                                .tint(T.accent)
+
+                            if ai.settings.autoLevel {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    levelLine("新卡 / 还在学", "认得出")
+                                    levelLine("记住了（稳定性 < 21 天）", "会套用")
+                                    levelLine("熟了（稳定性 ≥ 21 天）", "会变形")
+                                }
+                            } else {
+                                Picker("难度", selection: $ai.settings.fixedLevel) {
+                                    ForEach(QuizLevel.allCases) { Text($0.label).tag($0) }
+                                }
+                                .pickerStyle(.segmented)
+                                Text(ai.settings.fixedLevel.blurb)
+                                    .font(T.sans(12.5)).foregroundColor(T.faint)
+                            }
+                        }
+                    }
+                    Text("答题时按「这题太难了」，那张卡会单独降一档，而且刚才那道题会从题库里删掉。下次答对了自动升回来。")
+                        .font(T.sans(12)).foregroundColor(T.faint)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 4)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
                     SectionLabel(text: "出题参考几个薄弱点")
                     Panel {
                         HStack {
@@ -628,6 +685,15 @@ struct AISettingsView: View {
             }
         }
         .tint(T.accent)
+    }
+
+    private func levelLine(_ when: String, _ level: String) -> some View {
+        HStack(spacing: 8) {
+            Text(when)
+                .font(T.sans(13)).foregroundColor(T.dim)
+            Spacer()
+            Tag(text: level, color: T.accent, bg: T.accentBg)
+        }
     }
 
     private func fetchModels() {
