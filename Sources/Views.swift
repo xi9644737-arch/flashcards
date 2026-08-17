@@ -6,72 +6,133 @@ import UniformTypeIdentifiers
 
 struct DeckListView: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var ai: AIStore
+
     @State private var showNewDeck = false
     @State private var newName = ""
     @State private var showBackup = false
+    @State private var showAISettings = false
+    @State private var showWeak = false
+    @State private var showScheduler = false
+
+    private var totalDue: Int { store.decks.reduce(0) { $0 + $1.dueTotal } }
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
+            Screen(title: "卡片",
+                   subtitle: totalDue > 0 ? "今天有 \(totalDue) 张等着你" : "今天没有到期的") {
+
+                VStack(spacing: 10) {
                     ForEach(store.decks) { deck in
                         NavigationLink(value: deck.id) {
-                            HStack {
-                                Text(deck.name)
-                                    .fontWeight(.medium)
-                                Spacer()
-                                if deck.dueTotal > 0 {
-                                    Text("\(deck.dueTotal)")
-                                        .font(.footnote.weight(.semibold))
-                                        .padding(.horizontal, 9).padding(.vertical, 2)
-                                        .background(Color.red.opacity(0.16))
-                                        .foregroundColor(.red)
-                                        .clipShape(Capsule())
-                                }
-                                Text("\(deck.cards.count) 张")
-                                    .font(.footnote)
-                                    .foregroundColor(.secondary)
-                            }
+                            deckRow(deck)
                         }
-                    }
-                    .onDelete { offsets in
-                        store.decks.remove(atOffsets: offsets)
-                        store.save()
-                    }
-                } footer: {
-                    if store.decks.isEmpty {
-                        Text("右上角 ＋ 新建一个牌组。")
+                        .buttonStyle(.plain)
                     }
                 }
 
-                Section {
-                    Button("备份 / 恢复") { showBackup = true }
-                } footer: {
-                    Text("数据只存在这台手机上。重签、换机、删 app 之前，先导出一份。")
+                Button {
+                    showNewDeck = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus")
+                        Text("新建牌组")
+                    }
+                }
+                .buttonStyle(SecondaryButtonStyle())
+
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionLabel(text: "练习")
+                    Panel(padding: 0) {
+                        VStack(spacing: 0) {
+                            RowButton(title: "AI 设置",
+                                      subtitle: ai.settings.configured ? "已接好 \(ai.settings.model)" : "还没填接口") {
+                                showAISettings = true
+                            }
+                            .padding(.horizontal, T.pad).padding(.vertical, 14)
+
+                            Hair().padding(.leading, T.pad)
+
+                            RowButton(title: "薄弱点",
+                                      subtitle: ai.tags.isEmpty ? "做几道题就有了" : "记录了 \(ai.tags.count) 个知识点") {
+                                showWeak = true
+                            }
+                            .padding(.horizontal, T.pad).padding(.vertical, 14)
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionLabel(text: "设置")
+                    Panel(padding: 0) {
+                        VStack(spacing: 0) {
+                            RowButton(title: "复习算法",
+                                      subtitle: store.config.algorithm.label) {
+                                showScheduler = true
+                            }
+                            .padding(.horizontal, T.pad).padding(.vertical, 14)
+
+                            Hair().padding(.leading, T.pad)
+
+                            RowButton(title: "备份 / 恢复",
+                                      subtitle: "数据只在这台手机上") {
+                                showBackup = true
+                            }
+                            .padding(.horizontal, T.pad).padding(.vertical, 14)
+                        }
+                    }
                 }
             }
-            .navigationTitle("卡片")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(T.bg, for: .navigationBar)
             .navigationDestination(for: UUID.self) { id in
                 DeckView(deckID: id)
-            }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { showNewDeck = true } label: { Image(systemName: "plus") }
-                }
             }
             .alert("新建牌组", isPresented: $showNewDeck) {
                 TextField("名字", text: $newName)
                 Button("取消", role: .cancel) { newName = "" }
                 Button("建立") {
                     let n = newName.trimmingCharacters(in: .whitespaces)
-                    if !n.isEmpty {
-                        store.decks.append(Deck(name: n))
-                        store.save()
-                    }
+                    if !n.isEmpty { store.decks.append(Deck(name: n)); store.save() }
                     newName = ""
                 }
             }
             .sheet(isPresented: $showBackup) { BackupView() }
+            .sheet(isPresented: $showAISettings) { AISettingsView() }
+            .sheet(isPresented: $showWeak) { WeakPointsView() }
+            .sheet(isPresented: $showScheduler) { SchedulerSettingsView() }
+        }
+        .tint(T.accent)
+    }
+
+    private func deckRow(_ deck: Deck) -> some View {
+        Panel {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(deck.name)
+                        .font(T.serif(19, .medium))
+                        .foregroundColor(T.text)
+                    Text("\(deck.cards.count) 张卡")
+                        .font(T.sans(13))
+                        .foregroundColor(T.faint)
+                }
+                Spacer()
+                if deck.dueTotal > 0 {
+                    Text("\(deck.dueTotal)")
+                        .font(T.sans(15, .semibold))
+                        .foregroundColor(T.accent)
+                        .padding(.horizontal, 11).padding(.vertical, 5)
+                        .background(T.accentBg)
+                        .clipShape(Capsule())
+                } else {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(T.faint)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(T.faint)
+            }
         }
     }
 }
@@ -80,12 +141,15 @@ struct DeckListView: View {
 
 struct DeckView: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var ai: AIStore
     let deckID: UUID
 
+    @State private var showQuiz = false
     @State private var showStudy = false
     @State private var showImport = false
     @State private var showNewCard = false
     @State private var showRename = false
+    @State private var showDelete = false
     @State private var renameText = ""
 
     private var deck: Deck? { store.decks.first { $0.id == deckID } }
@@ -94,58 +158,105 @@ struct DeckView: View {
         Group {
             if let deck {
                 let c = deck.counts()
-                List {
-                    Section {
-                        VStack(spacing: 6) {
+                Screen(title: deck.name, subtitle: nil) {
+
+                    Panel {
+                        VStack(spacing: 10) {
                             Text("\(c.new + c.learn + c.review)")
-                                .font(.system(size: 44, weight: .semibold, design: .rounded))
-                            Text("张待复习").font(.footnote).foregroundColor(.secondary)
-                            HStack(spacing: 16) {
-                                Label("\(c.new)", systemImage: "circle.fill")
-                                    .foregroundColor(.blue)
-                                Label("\(c.learn)", systemImage: "circle.fill")
-                                    .foregroundColor(.orange)
-                                Label("\(c.review)", systemImage: "circle.fill")
-                                    .foregroundColor(.green)
+                                .font(T.serif(52, .semibold))
+                                .foregroundColor(T.text)
+                            Text("张待复习")
+                                .font(T.sans(13))
+                                .foregroundColor(T.faint)
+                            HStack(spacing: 20) {
+                                countPill("新", c.new, T.blue)
+                                countPill("学习", c.learn, T.amber)
+                                countPill("复习", c.review, T.green)
                             }
-                            .font(.caption)
-                            .labelStyle(.titleAndIcon)
                             .padding(.top, 4)
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
+                        .padding(.vertical, 6)
                     }
 
-                    Section {
+                    VStack(spacing: 10) {
                         Button {
                             showStudy = true
                         } label: {
-                            Text(deck.cards.isEmpty ? "还没有卡片"
-                                 : (deck.dueTotal > 0 ? "开始复习" : "没到期，随便翻翻"))
-                                .fontWeight(.semibold)
-                                .frame(maxWidth: .infinity)
+                            Text(deck.dueTotal > 0 ? "开始复习" : "没到期，随便翻翻")
                         }
+                        .buttonStyle(PrimaryButtonStyle(enabled: !deck.cards.isEmpty))
                         .disabled(deck.cards.isEmpty)
+
+                        Button {
+                            showQuiz = true
+                        } label: {
+                            HStack(spacing: 7) {
+                                Image(systemName: "sparkles")
+                                Text("AI 出题练习")
+                            }
+                        }
+                        .buttonStyle(SecondaryButtonStyle())
+                        .disabled(deck.cards.isEmpty)
+
+                        Text(ai.settings.configured
+                             ? "翻卡是测记没记住，出题是测会不会用。"
+                             : "出题练习要先在上一层填 API。")
+                            .font(T.sans(12.5))
+                            .foregroundColor(T.faint)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.leading, 4)
                     }
 
-                    Section {
-                        Button("批量导入") { showImport = true }
-                        Button("加一张卡") { showNewCard = true }
-                        NavigationLink("管理卡片（\(deck.cards.count)）") {
-                            CardListView(deckID: deckID)
+                    VStack(alignment: .leading, spacing: 8) {
+                        SectionLabel(text: "卡片")
+                        Panel(padding: 0) {
+                            VStack(spacing: 0) {
+                                RowButton(title: "批量导入", subtitle: "从别处复制粘贴进来") {
+                                    showImport = true
+                                }
+                                .padding(.horizontal, T.pad).padding(.vertical, 14)
+
+                                Hair().padding(.leading, T.pad)
+
+                                RowButton(title: "加一张卡") { showNewCard = true }
+                                    .padding(.horizontal, T.pad).padding(.vertical, 14)
+
+                                Hair().padding(.leading, T.pad)
+
+                                NavigationLink {
+                                    CardListView(deckID: deckID)
+                                } label: {
+                                    HStack {
+                                        Text("管理卡片").font(T.sans(16)).foregroundColor(T.text)
+                                        Spacer()
+                                        Text("\(deck.cards.count)")
+                                            .font(T.sans(14)).foregroundColor(T.faint)
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundColor(T.faint)
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.horizontal, T.pad).padding(.vertical, 14)
+                            }
                         }
                     }
+
+                    HStack(spacing: 10) {
+                        Button("改名") { renameText = deck.name; showRename = true }
+                            .buttonStyle(SecondaryButtonStyle())
+                        Button {
+                            showDelete = true
+                        } label: {
+                            Text("删除牌组").foregroundColor(T.red)
+                        }
+                        .buttonStyle(SecondaryButtonStyle())
+                    }
                 }
-                .navigationTitle(deck.name)
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        Button("改名") {
-                            renameText = deck.name
-                            showRename = true
-                        }
-                    }
-                }
+                .toolbarBackground(T.bg, for: .navigationBar)
                 .alert("改名", isPresented: $showRename) {
                     TextField("名字", text: $renameText)
                     Button("取消", role: .cancel) { }
@@ -156,23 +267,38 @@ struct DeckView: View {
                         }
                     }
                 }
-                .fullScreenCover(isPresented: $showStudy) {
-                    StudyView(deckID: deckID)
+                .alert("删掉「\(deck.name)」和里面 \(deck.cards.count) 张卡？", isPresented: $showDelete) {
+                    Button("取消", role: .cancel) { }
+                    Button("删除", role: .destructive) {
+                        store.decks.removeAll { $0.id == deckID }
+                        store.save()
+                    }
+                } message: {
+                    Text("不可撤销。")
                 }
-                .sheet(isPresented: $showImport) {
-                    ImportView(deckID: deckID)
-                }
-                .sheet(isPresented: $showNewCard) {
-                    CardEditView(deckID: deckID, cardID: nil)
-                }
+                .fullScreenCover(isPresented: $showStudy) { StudyView(deckID: deckID) }
+                .fullScreenCover(isPresented: $showQuiz) { QuizView(deckID: deckID) }
+                .sheet(isPresented: $showImport) { ImportView(deckID: deckID) }
+                .sheet(isPresented: $showNewCard) { CardEditView(deckID: deckID, cardID: nil) }
             } else {
-                Text("牌组不见了").foregroundColor(.secondary)
+                ZStack {
+                    T.bg.ignoresSafeArea()
+                    Text("牌组不见了").foregroundColor(T.dim)
+                }
             }
+        }
+    }
+
+    private func countPill(_ name: String, _ n: Int, _ color: Color) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text("\(n)").font(T.sans(14, .semibold)).foregroundColor(T.text)
+            Text(name).font(T.sans(12)).foregroundColor(T.faint)
         }
     }
 }
 
-// MARK: - 复习
+// MARK: - 翻卡复习
 
 struct StudyView: View {
     @EnvironmentObject var store: Store
@@ -184,127 +310,132 @@ struct StudyView: View {
     @State private var finished = false
 
     private var deckIndex: Int? { store.index(of: deckID) }
-
     private var card: Card? {
         guard let i = deckIndex, let cid = currentID else { return nil }
         return store.decks[i].cards.first { $0.id == cid }
     }
 
     var body: some View {
-        NavigationStack {
+        ZStack {
+            T.bg.ignoresSafeArea()
             VStack(spacing: 0) {
+                topBar
+
                 if let card {
-                    counters
                     ScrollView {
-                        VStack(spacing: 18) {
-                            faceView(text: card.front, image: card.frontImage, size: 22)
+                        VStack(spacing: 22) {
+                            face(text: card.front, image: card.frontImage, size: 23, weight: .medium)
                             if revealed {
-                                Divider().frame(width: 70)
-                                faceView(text: card.back, image: card.backImage, size: 20)
+                                Rectangle().fill(T.line)
+                                    .frame(width: 56, height: 1)
+                                face(text: card.back, image: card.backImage, size: 20, weight: .regular)
                             }
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 30)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 36)
                     }
                     .contentShape(Rectangle())
                     .onTapGesture { if !revealed { revealed = true } }
 
                     if revealed {
-                        gradeButtons(card)
+                        gradeBar(card)
                     } else {
-                        Button {
-                            revealed = true
-                        } label: {
-                            Text("显示答案")
-                                .fontWeight(.semibold)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 14)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 20)
+                        Button("显示答案") { revealed = true }
+                            .buttonStyle(PrimaryButtonStyle())
+                            .padding(.horizontal, 18)
+                            .padding(.bottom, 22)
                     }
                 } else {
                     Spacer()
-                    Text(finished ? "这一轮完事了。" : "这个牌组还没有卡片。")
-                        .foregroundColor(.secondary)
+                    VStack(spacing: 10) {
+                        Text(finished ? "这一轮完事了" : "这个牌组还没有卡片")
+                            .font(T.serif(21, .medium))
+                            .foregroundColor(T.text)
+                        if finished {
+                            Text("过一会儿再回来")
+                                .font(T.sans(13)).foregroundColor(T.faint)
+                        }
+                    }
                     Spacer()
-                }
-            }
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("关闭") { dismiss() }
                 }
             }
         }
         .onAppear { pickFirst() }
     }
 
-    private var counters: some View {
+    private var topBar: some View {
         let c = deckIndex.map { store.decks[$0].counts() } ?? (new: 0, learn: 0, review: 0)
-        return HStack(spacing: 18) {
-            Text("\(c.new)").foregroundColor(.blue)
-            Text("\(c.learn)").foregroundColor(.orange)
-            Text("\(c.review)").foregroundColor(.green)
+        return HStack {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(T.dim)
+                    .frame(width: 34, height: 34)
+                    .background(T.surface)
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(T.line, lineWidth: 1))
+            }
+            Spacer()
+            HStack(spacing: 14) {
+                Text("\(c.new)").foregroundColor(T.blue)
+                Text("\(c.learn)").foregroundColor(T.amber)
+                Text("\(c.review)").foregroundColor(T.green)
+            }
+            .font(T.sans(14, .semibold))
+            Spacer()
+            Color.clear.frame(width: 34, height: 34)
         }
-        .font(.footnote.weight(.semibold))
-        .padding(.top, 6)
+        .padding(.horizontal, 18)
+        .padding(.top, 8)
     }
 
     @ViewBuilder
-    private func faceView(text: String, image: Data?, size: CGFloat) -> some View {
-        VStack(spacing: 14) {
+    private func face(text: String, image: Data?, size: CGFloat, weight: Font.Weight) -> some View {
+        VStack(spacing: 16) {
             if !text.isEmpty {
                 Text(text)
-                    .font(.system(size: size))
+                    .font(T.serif(size, weight))
+                    .foregroundColor(T.text)
                     .multilineTextAlignment(.center)
                     .textSelection(.enabled)
             }
             if let image, let ui = UIImage(data: image) {
                 Image(uiImage: ui)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxHeight: 320)
+                    .resizable().scaledToFit()
+                    .frame(maxHeight: 300)
                     .background(Color.white)
-                    .cornerRadius(10)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             if text.isEmpty && image == nil {
-                Text("（空）").foregroundColor(.secondary)
+                Text("（空）").foregroundColor(T.faint)
             }
         }
     }
 
-    private func gradeButtons(_ card: Card) -> some View {
+    private func gradeBar(_ card: Card) -> some View {
         HStack(spacing: 8) {
             ForEach(Grade.allCases) { g in
                 Button {
                     answer(g)
                 } label: {
-                    VStack(spacing: 2) {
-                        Text(g.title).font(.system(size: 15, weight: .semibold))
-                        Text(Scheduler.preview(card, g)).font(.system(size: 11)).opacity(0.85)
+                    VStack(spacing: 3) {
+                        Text(g.title).font(T.sans(15, .semibold))
+                        Text(Scheduler.preview(card, g, config: store.config))
+                            .font(T.sans(11)).opacity(0.85)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .background(color(for: g))
+                    .padding(.vertical, 13)
+                    .background(T.gradeColor(g))
                     .foregroundColor(.white)
-                    .cornerRadius(12)
+                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
                 }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 20)
-    }
-
-    private func color(for g: Grade) -> Color {
-        switch g {
-        case .again: return Color(red: 0.90, green: 0.33, blue: 0.29)
-        case .hard:  return Color(red: 0.85, green: 0.51, blue: 0.17)
-        case .good:  return Color(red: 0.18, green: 0.62, blue: 0.39)
-        case .easy:  return Color(red: 0.25, green: 0.50, blue: 0.84)
-        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 22)
     }
 
     private func pickFirst() {
@@ -317,16 +448,10 @@ struct StudyView: View {
     }
 
     private func answer(_ g: Grade) {
-        guard let i = deckIndex,
-              let cid = currentID,
-              let ci = store.decks[i].cards.firstIndex(where: { $0.id == cid })
-        else { return }
-
-        Scheduler.apply(&store.decks[i].cards[ci], g)
-        store.save()
-
-        let remaining = store.decks[i].dueCards()
-        if let next = remaining.first {
+        guard let cid = currentID else { return }
+        store.answer(deckID: deckID, cardID: cid, grade: g)
+        guard let i = deckIndex else { return }
+        if let next = store.decks[i].dueCards().first {
             currentID = next.id
             revealed = false
         } else {
@@ -342,44 +467,85 @@ struct CardListView: View {
     @EnvironmentObject var store: Store
     let deckID: UUID
     @State private var showNew = false
+    @State private var search = ""
 
     private var deck: Deck? { store.decks.first { $0.id == deckID } }
 
+    private var filtered: [Card] {
+        guard let deck else { return [] }
+        let k = search.trimmingCharacters(in: .whitespaces)
+        if k.isEmpty { return deck.cards }
+        return deck.cards.filter { $0.front.contains(k) || $0.back.contains(k) }
+    }
+
     var body: some View {
-        List {
-            if let deck {
-                ForEach(deck.cards) { card in
-                    NavigationLink {
-                        CardEditView(deckID: deckID, cardID: card.id)
+        Screen(title: "管理卡片", subtitle: "\(deck?.cards.count ?? 0) 张") {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundColor(T.faint)
+                TextField("搜索", text: $search)
+                    .font(T.sans(15))
+                if !search.isEmpty {
+                    Button {
+                        search = ""
                     } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(card.front.isEmpty ? "（图片）" : card.front)
-                                .lineLimit(1)
-                            Text(card.back.isEmpty ? "（图片）" : card.back)
-                                .font(.footnote)
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
+                        Image(systemName: "xmark.circle.fill").foregroundColor(T.faint)
+                    }
+                }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 11)
+            .background(T.sunken)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            Button {
+                showNew = true
+            } label: {
+                HStack(spacing: 6) { Image(systemName: "plus"); Text("加一张卡") }
+            }
+            .buttonStyle(SecondaryButtonStyle())
+
+            if filtered.isEmpty {
+                Panel {
+                    Text(search.isEmpty ? "还没有卡片。" : "没搜到。")
+                        .font(T.sans(14)).foregroundColor(T.dim)
+                }
+            } else {
+                Panel(padding: 0) {
+                    VStack(spacing: 0) {
+                        ForEach(Array(filtered.enumerated()), id: \.element.id) { idx, card in
+                            NavigationLink {
+                                CardEditView(deckID: deckID, cardID: card.id)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(card.front.isEmpty ? "（图片）" : card.front)
+                                            .font(T.sans(15)).foregroundColor(T.text)
+                                            .lineLimit(1)
+                                        Text(card.back.isEmpty ? "（图片）" : card.back)
+                                            .font(T.sans(12.5)).foregroundColor(T.faint)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer(minLength: 8)
+                                    Tag(text: card.stateName)
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundColor(T.faint)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.horizontal, T.pad).padding(.vertical, 13)
+
+                            if idx < filtered.count - 1 {
+                                Hair().padding(.leading, T.pad)
+                            }
                         }
                     }
                 }
-                .onDelete { offsets in
-                    if let i = store.index(of: deckID) {
-                        store.decks[i].cards.remove(atOffsets: offsets)
-                        store.save()
-                    }
-                }
             }
         }
-        .navigationTitle("卡片 \(deck?.cards.count ?? 0)")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button { showNew = true } label: { Image(systemName: "plus") }
-            }
-        }
-        .sheet(isPresented: $showNew) {
-            CardEditView(deckID: deckID, cardID: nil)
-        }
+        .toolbarBackground(T.bg, for: .navigationBar)
+        .sheet(isPresented: $showNew) { CardEditView(deckID: deckID, cardID: nil) }
     }
 }
 
@@ -399,39 +565,37 @@ struct CardEditView: View {
     @State private var frontItem: PhotosPickerItem?
     @State private var backItem: PhotosPickerItem?
     @State private var loaded = false
+    @State private var showDelete = false
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("正面（问题）") {
-                    TextEditor(text: $front).frame(minHeight: 88)
-                    PhotosPicker("加图片", selection: $frontItem, matching: .images)
-                    if let frontImage, let ui = UIImage(data: frontImage) {
-                        Image(uiImage: ui).resizable().scaledToFit().frame(maxHeight: 160)
-                        Button("移除图片", role: .destructive) { self.frontImage = nil }
+            Screen(title: cardID == nil ? "新卡片" : "编辑卡片") {
+                editBlock(label: "正面 · 问题", text: $front, image: $frontImage,
+                          item: $frontItem, placeholder: "二次函数顶点横坐标")
+                editBlock(label: "背面 · 答案", text: $back, image: $backImage,
+                          item: $backItem, placeholder: "x = −b / (2a)")
+
+                Text("公式直接截图当图片，比打字快。图片会压到宽 900 存起来。")
+                    .font(T.sans(12.5)).foregroundColor(T.faint)
+                    .padding(.leading, 4)
+
+                Button("保存") { save() }
+                    .buttonStyle(PrimaryButtonStyle())
+
+                if cardID != nil {
+                    Button {
+                        showDelete = true
+                    } label: {
+                        Text("删掉这张卡").foregroundColor(T.red)
                     }
-                }
-                Section("背面（答案）") {
-                    TextEditor(text: $back).frame(minHeight: 88)
-                    PhotosPicker("加图片", selection: $backItem, matching: .images)
-                    if let backImage, let ui = UIImage(data: backImage) {
-                        Image(uiImage: ui).resizable().scaledToFit().frame(maxHeight: 160)
-                        Button("移除图片", role: .destructive) { self.backImage = nil }
-                    }
-                }
-                Section {
-                    Text("公式直接截图当图片，比打字快。图片会压到宽 900 以内。")
-                        .font(.footnote).foregroundColor(.secondary)
+                    .buttonStyle(SecondaryButtonStyle())
                 }
             }
-            .navigationTitle(cardID == nil ? "新卡片" : "编辑")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(T.bg, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("取消") { dismiss() }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("保存") { save() }.fontWeight(.semibold)
+                    Button("取消") { dismiss() }.tint(T.dim)
                 }
             }
             .onAppear(perform: loadExisting)
@@ -441,26 +605,69 @@ struct CardEditView: View {
             .onChange(of: backItem) { item in
                 Task { backImage = await loadImage(item) }
             }
+            .alert("删掉这张卡？", isPresented: $showDelete) {
+                Button("取消", role: .cancel) { }
+                Button("删除", role: .destructive) { deleteCard() }
+            }
+        }
+        .tint(T.accent)
+    }
+
+    @ViewBuilder
+    private func editBlock(label: String, text: Binding<String>, image: Binding<Data?>,
+                           item: Binding<PhotosPickerItem?>, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionLabel(text: label)
+            Panel {
+                VStack(alignment: .leading, spacing: 12) {
+                    ZStack(alignment: .topLeading) {
+                        if text.wrappedValue.isEmpty {
+                            Text(placeholder)
+                                .font(T.sans(16)).foregroundColor(T.faint)
+                                .padding(.top, 8).padding(.leading, 5)
+                        }
+                        TextEditor(text: text)
+                            .font(T.sans(16))
+                            .scrollContentBackground(.hidden)
+                            .frame(minHeight: 88)
+                    }
+
+                    if let data = image.wrappedValue, let ui = UIImage(data: data) {
+                        Image(uiImage: ui)
+                            .resizable().scaledToFit()
+                            .frame(maxHeight: 170)
+                            .background(Color.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        Button("移除图片") { image.wrappedValue = nil }
+                            .font(T.sans(13)).foregroundColor(T.red)
+                    }
+
+                    PhotosPicker(selection: item, matching: .images) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "photo")
+                            Text("加图片")
+                        }
+                        .font(T.sans(13.5))
+                        .foregroundColor(T.accent)
+                    }
+                }
+            }
         }
     }
 
     private func loadImage(_ item: PhotosPickerItem?) async -> Data? {
-        guard let item else { return nil }
-        guard let data = try? await item.loadTransferable(type: Data.self) else { return nil }
+        guard let item,
+              let data = try? await item.loadTransferable(type: Data.self) else { return nil }
         return ImageTool.downscale(data)
     }
 
     private func loadExisting() {
         guard !loaded else { return }
         loaded = true
-        guard let cardID,
-              let i = store.index(of: deckID),
-              let c = store.decks[i].cards.first(where: { $0.id == cardID })
-        else { return }
-        front = c.front
-        back = c.back
-        frontImage = c.frontImage
-        backImage = c.backImage
+        guard let cardID, let i = store.index(of: deckID),
+              let c = store.decks[i].cards.first(where: { $0.id == cardID }) else { return }
+        front = c.front; back = c.back
+        frontImage = c.frontImage; backImage = c.backImage
     }
 
     private func save() {
@@ -480,6 +687,13 @@ struct CardEditView: View {
         store.save()
         dismiss()
     }
+
+    private func deleteCard() {
+        guard let cardID, let i = store.index(of: deckID) else { return }
+        store.decks[i].cards.removeAll { $0.id == cardID }
+        store.save()
+        dismiss()
+    }
 }
 
 // MARK: - 批量导入
@@ -493,55 +707,178 @@ struct ImportView: View {
     @State private var mode: ImportMode = .oneLine
     @State private var message: String?
 
+    private var preview: [Card] { CardParser.parse(text, mode: mode) }
+
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
+            Screen(title: "批量导入", subtitle: "从别处复制，粘贴进来") {
                 Picker("模式", selection: $mode) {
                     ForEach(ImportMode.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
 
                 Text(mode.hint)
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
+                    .font(T.sans(12.5)).foregroundColor(T.faint)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 4)
 
-                TextEditor(text: $text)
-                    .font(.system(size: 15, design: .monospaced))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.3)))
+                Panel {
+                    TextEditor(text: $text)
+                        .font(.system(size: 14.5, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 220)
+                }
+
+                if !text.isEmpty {
+                    Text(preview.isEmpty
+                         ? "按这个模式一张也认不出来，换一个试试。"
+                         : "认出 \(preview.count) 张。第一张：\(preview[0].front) → \(preview[0].back)")
+                        .font(T.sans(12.5))
+                        .foregroundColor(preview.isEmpty ? T.amber : T.green)
+                        .padding(.leading, 4)
+                }
 
                 if let message {
-                    Text(message).font(.footnote).foregroundColor(.orange)
+                    Text(message).font(T.sans(13)).foregroundColor(T.amber)
                 }
 
-                Button {
-                    doImport()
-                } label: {
-                    Text("导入").fontWeight(.semibold).frame(maxWidth: .infinity).padding(.vertical, 12)
-                }
-                .buttonStyle(.borderedProminent)
+                Button("导入 \(preview.count) 张") { doImport() }
+                    .buttonStyle(PrimaryButtonStyle(enabled: !preview.isEmpty))
+                    .disabled(preview.isEmpty)
             }
-            .padding(16)
-            .navigationTitle("批量导入")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(T.bg, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("取消") { dismiss() }
+                    Button("取消") { dismiss() }.tint(T.dim)
                 }
             }
         }
+        .tint(T.accent)
     }
 
     private func doImport() {
-        let cards = CardParser.parse(text, mode: mode)
-        guard !cards.isEmpty else {
-            message = "一张也没认出来。换个模式，或者检查分隔符。"
+        let cards = preview
+        guard !cards.isEmpty, let i = store.index(of: deckID) else {
+            message = "一张也没认出来。"
             return
         }
-        guard let i = store.index(of: deckID) else { return }
         store.decks[i].cards.append(contentsOf: cards)
         store.save()
         dismiss()
+    }
+}
+
+// MARK: - 复习算法设置
+
+struct SchedulerSettingsView: View {
+    @EnvironmentObject var store: Store
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Screen(title: "复习算法") {
+                VStack(spacing: 10) {
+                    ForEach(Algorithm.allCases) { a in
+                        Button {
+                            store.config.algorithm = a
+                        } label: {
+                            Panel {
+                                HStack(alignment: .top, spacing: 12) {
+                                    Image(systemName: store.config.algorithm == a
+                                          ? "largecircle.fill.circle" : "circle")
+                                        .foregroundColor(store.config.algorithm == a ? T.accent : T.faint)
+                                        .font(.system(size: 19))
+                                        .padding(.top, 1)
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(a.label)
+                                            .font(T.serif(18, .medium)).foregroundColor(T.text)
+                                        Text(a.blurb)
+                                            .font(T.sans(13)).foregroundColor(T.dim)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                if store.config.algorithm == .fsrs {
+                    VStack(alignment: .leading, spacing: 8) {
+                        SectionLabel(text: "目标记忆保持率")
+                        Panel {
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack {
+                                    Text(String(format: "%.0f%%", store.config.requestRetention * 100))
+                                        .font(T.serif(28, .semibold))
+                                        .foregroundColor(T.accent)
+                                    Spacer()
+                                    Text(retentionNote)
+                                        .font(T.sans(12.5)).foregroundColor(T.faint)
+                                }
+                                Slider(value: $store.config.requestRetention, in: 0.75...0.97, step: 0.01)
+                                    .tint(T.accent)
+                                Text("到期那天，你还记得这张卡的概率。调高＝复习更勤、记得更牢、花时间更多；调低反过来。90% 是通用的甜点。")
+                                    .font(T.sans(12.5)).foregroundColor(T.faint)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        SectionLabel(text: "间隔上限")
+                        Panel {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Text("\(Int(store.config.maximumInterval)) 天")
+                                        .font(T.sans(16, .semibold)).foregroundColor(T.text)
+                                    Spacer()
+                                    Stepper("", value: $store.config.maximumInterval,
+                                            in: 30...(365 * 10), step: 365)
+                                        .labelsHidden()
+                                }
+                                Text("再熟的卡也不会隔得比这更久。")
+                                    .font(T.sans(12.5)).foregroundColor(T.faint)
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        SectionLabel(text: "参数")
+                        Panel {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("用的是 FSRS-4.5 官方默认参数。")
+                                    .font(T.sans(14)).foregroundColor(T.text)
+                                Text("已经攒了 \(store.logCount) 条复习记录。等这个数上千，就有条件用你自己的数据重新拟合一套专属参数，那时候间隔会更准。记录跟着备份一起存。")
+                                    .font(T.sans(12.5)).foregroundColor(T.faint)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+
+                Text("换算法不会清掉已有进度。FSRS 用稳定性和难度，SM-2 用 ease，两套数各存各的，来回切也不会打架。")
+                    .font(T.sans(12.5)).foregroundColor(T.faint)
+                    .padding(.leading, 4)
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(T.bg, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") { dismiss() }.tint(T.accent)
+                }
+            }
+        }
+        .tint(T.accent)
+    }
+
+    private var retentionNote: String {
+        let r = store.config.requestRetention
+        if r >= 0.94 { return "很勤，适合考前" }
+        if r >= 0.88 { return "常用" }
+        if r >= 0.82 { return "省时间" }
+        return "很省，会忘得多"
     }
 }
 
@@ -575,29 +912,40 @@ struct BackupView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    Button("导出备份文件") { showExporter = true }
-                    Button("从备份文件恢复") { showImporter = true }
-                } footer: {
-                    Text("导出的是一个 .json 文件，可以存到「文件」、发给自己或者传网盘。恢复会覆盖当前全部数据。")
+            Screen(title: "备份 / 恢复") {
+                Panel {
+                    let total = store.decks.reduce(0) { $0 + $1.cards.count }
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("\(store.decks.count) 个牌组 · \(total) 张卡")
+                            .font(T.sans(16)).foregroundColor(T.text)
+                        Text("复习记录 \(store.logCount) 条")
+                            .font(T.sans(12.5)).foregroundColor(T.faint)
+                    }
                 }
 
-                Section {
-                    let total = store.decks.reduce(0) { $0 + $1.cards.count }
-                    Text("\(store.decks.count) 个牌组 · \(total) 张卡")
-                        .foregroundColor(.secondary)
+                VStack(spacing: 10) {
+                    Button("导出备份文件") { showExporter = true }
+                        .buttonStyle(PrimaryButtonStyle())
+                    Button("从备份文件恢复") { showImporter = true }
+                        .buttonStyle(SecondaryButtonStyle())
                 }
 
                 if let message {
-                    Section { Text(message).foregroundColor(.orange) }
+                    Text(message).font(T.sans(13))
+                        .foregroundColor(message.hasPrefix("导出好") || message.hasPrefix("恢复好") ? T.green : T.amber)
+                        .padding(.leading, 4)
                 }
+
+                Text("导出的是一个 .json 文件，可以存到「文件」、发给自己或者传网盘。恢复会覆盖当前全部数据。\n\n免费签名 7 天到期后重签是覆盖安装，数据不会丢；但删掉 app 再装就没了，所以隔一阵导一次。")
+                    .font(T.sans(12.5)).foregroundColor(T.faint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 4)
             }
-            .navigationTitle("备份 / 恢复")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(T.bg, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("完成") { dismiss() }
+                    Button("完成") { dismiss() }.tint(T.accent)
                 }
             }
             .fileExporter(isPresented: $showExporter,
@@ -609,8 +957,7 @@ struct BackupView: View {
                 case .failure(let e): message = "导出失败：\(e.localizedDescription)"
                 }
             }
-            .fileImporter(isPresented: $showImporter,
-                          allowedContentTypes: [.json]) { result in
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.json]) { result in
                 switch result {
                 case .success(let url):
                     let needsStop = url.startAccessingSecurityScopedResource()
@@ -624,5 +971,6 @@ struct BackupView: View {
                 }
             }
         }
+        .tint(T.accent)
     }
 }
